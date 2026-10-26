@@ -1,0 +1,43 @@
+# mcef-forge-1.20.1 —— MCEF 的 Android 移植
+#
+# modId 用 "mcef"：与上游 CinemaMod MCEF 保持一致，
+# 这样依赖它的 mod（例如 WebDisplays）在查找时不会因为 modId 不同而失败。
+modLoader="javafml"
+loaderVersion="[43,)"
+
+license="All Rights Reserved"
+
+# 上游 MCEF 是 LGPL-2.1；本项目是按 JCEF 公开 API 重新实现的，
+# 不做 copyleft 传染，所以这里写保留所有权利。
+
+[[mods]]
+modId="mcef"
+version="2.1.1-1.20.1-android"
+displayName="MCEF (Android / Cefrium)"
+displayURL="https://github.com/CinemaMod/mcef"
+authors="Android port"
+description='''
+MCEF 的 Android 移植：把 Cefrium（Chromium Embedded Framework 的原生 Android 移植）
+包装成 JCEF 的 Java API，让依赖 org.cef.* / com.cinemamod.mcef.* 的 mod
+（例如 WebDisplays）能在 Android 上的 MC 1.20.1 Forge 里运行。
+
+架构：MC JVM 是纯 OpenJDK，加载不到 android.* 类，所以本 mod 只通过
+libmcef.so 的 JNI 与启动器的 .cefhost 进程通信（IPC 127.0.0.1:39090），
+真正跑 Chromium 的是那个 Android 进程。
+'''
+
+# 只依赖 forge 与 minecraft。
+# 不写 "side"：留空表示 BOTH，但本 mod 内部只做客户端渲染。
+[[dependencies.mcef]]
+modId="forge"
+mandatory=true
+versionRange="[43,)"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.mcef]]
+modId="minecraft"
+mandatory=true
+versionRange="[1.20.1,)"
+ordering="NONE"
+side="BOTH"
