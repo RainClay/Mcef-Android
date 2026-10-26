@@ -22,3 +22,21 @@
 # virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*
 replay_pid*
+
+# ── 构建产物与本地依赖（体积极大，且可从 POM / 官方源重新获取）──────────
+.gradle/
+build/
+build*.log
+
+#   cefrium-sdk-*.jar   ≈ 62 MB
+#   minecraft-*.jar     ≈ 36 MB
+#   android.jar         ≈ 26 MB
+libs/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# 本地配置（可能含签名口令）
+local.properties
