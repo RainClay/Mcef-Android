@@ -1,0 +1,53 @@
+// mcef-forge-1.20.1 —— 让 WebDisplays 这类依赖 JCEF API 的 mod 在
+// Android + MC 1.20.1 Forge 上运行。
+//
+// ── 架构（决定了这里的依赖清单）────────────────────────────────────────
+//
+//   MC JVM（纯 OpenJDK，加载不到 android.*）
+//     └── com.cinemamod.mcef.*   ← 本项目（零 android 依赖）
+//           └── McefNative (JNI) → libmcef.so
+//                 └── IPC 127.0.0.1:39090
+//                       └── 启动器 .cefhost 进程（ART + Cefrium + libcef）
+//
+// 所以本项目<b>不依赖 Cefrium SDK</b>：Cefrium 只跑在启动器进程里，
+// MC 侧只跟 libmcef.so 打交道。
+//
+// ── Java 版本 ────────────────────────────────────────────────────────
+//
+// 用 JDK 25 编译，输出 Java 17 字节码：
+//   - MC 1.20.1 的 class 是 v61（Java 17），必须能在 Java 17 上加载
+//   - libs 里若有 v69 的类，只有 JDK 25 读得懂
+// 注意必须用 -source/-target，不能用 --release 17（会把 API 视图切回 17，
+// 读到 v69 的类直接报 wrong version）。
+
+plugins {
+    id 'java-library'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+dependencies {
+    compileOnly fileTree(dir: 'libs', include: ['*.jar'])
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = null     // 关键：禁用 --release，走 -source/-target
+    options.compilerArgs << '-Xlint:-deprecation' << '-Xlint:-unchecked' << '-Xlint:-options'
+}
+
+// so 随 jar 一起分发，McefNative 静态块会优先 loadLibrary，
+// 失败时从 jar 内 /natives/arm64-v8a/libmcef.so 解压加载。
+jar {
+    archiveBaseName = 'mcef-forge'
+    archiveVersion = '2.1.1-1.20.1-android'
+    // 本 jar <b>不含</b> libmcef.so。
+    //
+    // so 由启动器打进 APK 的 lib/arm64-v8a/，MC 侧 System.loadLibrary("mcef")
+    // 直接加载。不从 jar 解压：Android 上临时目录常挂 noexec，解压出来的 .so
+    // System.load 会失败；而 APK 里的 so 由安装器解压到 app 私有 lib 目录，
+    // 权限与 SELinux 上下文都是对的。
+}
