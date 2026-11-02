@@ -357,10 +357,14 @@ JAVA_HOME=/path/to/jdk-25 ./gradlew jar
 
 ---
 
-## 版权
+## 许可证
 
-本项目为**保留所有权利**（All rights reserved）。
+本分支按仓库根目录的 [GPL-3.0](LICENSE) 发布；此 README 原先写的「保留所有权利」不正确，已更正。
 
-JCEF 的 API 形状来自 Chromium/CEF（BSD 许可），上游 MCEF 为 LGPL-2.1。
-本项目的 `org.cef.*` 是**按 JCEF 的公开 API 重新写的实现**，不是拷贝；
-`com.cinemamod.mcef.*` 保持同名同签名以兼容消费方，实现为全新编写。
+第三方组件仍按各自许可证：
+
+- Chromium / CEF / JCEF 相关 API 与实现：以各自源码和发行物附带的许可证为准（常见为 BSD）。
+- CinemaMod 上游 MCEF：LGPL-2.1；本分支如包含或修改其受版权保护代码，须遵守上游许可证及其适用的源代码提供义务。
+- Zalith Launcher 集成源码（`launcher-integration` 分支）：遵从 Zalith Launcher 仓库 GPL-3.0 许可证，并保留对应版权声明。
+
+本仓库的兼容层和 Android/Forge 适配代码不改变上述第三方组件的许可证。请以仓库内 LICENSE 文件及具体文件头的版权/许可证声明为准。
