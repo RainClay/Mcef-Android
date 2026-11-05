@@ -5,16 +5,13 @@
 modLoader="javafml"
 loaderVersion="[43,)"
 
-license="All Rights Reserved"
-
-# 上游 MCEF 是 LGPL-2.1；本项目是按 JCEF 公开 API 重新实现的，
-# 不做 copyleft 传染，所以这里写保留所有权利。
+license="GPL-3.0-or-later"
 
 [[mods]]
 modId="mcef"
 version="2.1.1-1.20.1-android"
 displayName="MCEF (Android / Cefrium)"
-displayURL="https://github.com/CinemaMod/mcef"
+displayURL="https://github.com/RainClay/Mcef-Android"
 authors="Android port"
 description='''
 MCEF 的 Android 移植：把 Cefrium（Chromium Embedded Framework 的原生 Android 移植）

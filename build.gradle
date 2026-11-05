@@ -9,45 +9,71 @@
 //                 └── IPC 127.0.0.1:39090
 //                       └── 启动器 .cefhost 进程（ART + Cefrium + libcef）
 //
-// 所以本项目<b>不依赖 Cefrium SDK</b>：Cefrium 只跑在启动器进程里，
+// 所以本项目不依赖 Cefrium SDK：Cefrium 只跑在启动器进程里，
 // MC 侧只跟 libmcef.so 打交道。
+//
+// ── 依赖从哪来 ───────────────────────────────────────────────────────
+//
+// 早先这棵树依赖一个被 .gitignore 排除的 libs/ 目录，干净 clone 直接构建失败。
+// 现在改用 ForgeGradle 6 从 Maven 解析 MC/Forge/LWJGL，libs/ 只作为本地覆盖入口。
 //
 // ── Java 版本 ────────────────────────────────────────────────────────
 //
-// 用 JDK 25 编译，输出 Java 17 字节码：
-//   - MC 1.20.1 的 class 是 v61（Java 17），必须能在 Java 17 上加载
-//   - libs 里若有 v69 的类，只有 JDK 25 读得懂
-// 注意必须用 -source/-target，不能用 --release 17（会把 API 视图切回 17，
-// 读到 v69 的类直接报 wrong version）。
+// 输出必须是 Java 17 字节码（MC 1.20.1 的 class 是 v61）。
+// 用 JDK 17 或更高版本运行 Gradle 都可以，这里只钉输出级别。
 
 plugins {
     id 'java-library'
+    id 'net.minecraftforge.gradle' version '6.0.54'
 }
+
+version = '2.1.1-1.20.1-android'
+group = 'com.cinemamod'
 
 java {
     sourceCompatibility = JavaVersion.VERSION_17
     targetCompatibility = JavaVersion.VERSION_17
 }
 
+minecraft {
+    mappings channel: 'official', version: '1.20.1'
+}
+
+repositories {
+    maven { name = 'forge'; url = 'https://maven.minecraftforge.net/' }
+    mavenCentral()
+}
+
 dependencies {
+    minecraft 'net.minecraftforge:forge:1.20.1-47.4.0'
+
+    // 可选本地覆盖：把额外的 jar 丢进 libs/ 即可，不存在也不会报错。
     compileOnly fileTree(dir: 'libs', include: ['*.jar'])
 }
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
-    options.release = null     // 关键：禁用 --release，走 -source/-target
+    // 不要用 --release：它会把 API 视图锁到目标版本，遇到高版本 class 直接报
+    // "class file has wrong version"。-source/-target 只约束输出。
+    options.release = null
     options.compilerArgs << '-Xlint:-deprecation' << '-Xlint:-unchecked' << '-Xlint:-options'
 }
 
-// so 随 jar 一起分发，McefNative 静态块会优先 loadLibrary，
-// 失败时从 jar 内 /natives/arm64-v8a/libmcef.so 解压加载。
+// jar 里不含 libmcef.so。
+//
+// so 由启动器打进 APK 的 lib/arm64-v8a/，MC 侧 System.loadLibrary("mcef")
+// 直接加载。不从 jar 解压：Android 上临时目录常挂 noexec，解压出来的 .so
+// 会 dlopen 失败；而 APK 里的 so 由安装器解压到 app 私有 lib 目录，
+// 权限与 SELinux 上下文都是对的。
 jar {
     archiveBaseName = 'mcef-forge'
-    archiveVersion = '2.1.1-1.20.1-android'
-    // 本 jar <b>不含</b> libmcef.so。
-    //
-    // so 由启动器打进 APK 的 lib/arm64-v8a/，MC 侧 System.loadLibrary("mcef")
-    // 直接加载。不从 jar 解压：Android 上临时目录常挂 noexec，解压出来的 .so
-    // System.load 会失败；而 APK 里的 so 由安装器解压到 app 私有 lib 目录，
-    // 权限与 SELinux 上下文都是对的。
+    manifest {
+        attributes([
+                'Specification-Title'    : 'mcef-forge',
+                'Implementation-Title'   : project.name,
+                'Implementation-Version' : project.version,
+        ])
+    }
 }
+
+// ForgeGradle 6 的 jar 任务已包含 reobf，产物可直接投入 mods/。

@@ -1,3 +1,26 @@
+/*
+ * MCEF-Android (Forge 1.20.1)
+ * Copyright (C) 2026 Rain_Clay and contributors
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * PROVENANCE: independent implementation, not a derivative work of
+ * CinemaMod MCEF (LGPL-2.1). Names are kept identical only to satisfy
+ * WebDisplays bytecode references; no upstream source, comments or
+ * implementation logic is included. See README "与上游的关系".
+ */
+
 package com.cinemamod.mcef;
 
 import com.cinemamod.mcef.listeners.MCEFInitListener;
@@ -39,18 +62,6 @@ public final class MCEF {
     private static volatile MCEFClient client;
 
     private static final List<MCEFInitListener> PENDING_INIT = new ArrayList<>();
-
-    /**
-     * 当前活着的浏览器。
-     *
-     * <p>必须有人每帧驱动它们 {@link MCEFBrowser#tick()} —— 帧是从 IPC 缓存里
-     * <b>轮询</b>取出来的，不是回调推过来的。WebDisplays 以为 mcef 自己管渲染
-     * （上游是 CEF 主动 onPaint），它不会调 tick()，所以如果没人调，
-     * 纹理就永远是空的、屏幕上一片黑。</p>
-     *
-     * <p>驱动入口在 {@code MCEFMod} 的 RenderTickEvent 监听里。</p>
-     */
-    private static final List<MCEFBrowser> ACTIVE = new java.util.concurrent.CopyOnWriteArrayList<>();
 
     private MCEF() {
     }
@@ -226,40 +237,6 @@ public final class MCEF {
                 l.onInit(true);
             } catch (Throwable t) {
                 LOGGER.error("queued init listener failed", t);
-            }
-        }
-    }
-
-    /** 注册一个活着的浏览器（构造时调）。 */
-    static void registerActive(MCEFBrowser browser) {
-        if (browser != null && !ACTIVE.contains(browser)) {
-            ACTIVE.add(browser);
-        }
-    }
-
-    /** 注销（关闭时调）。 */
-    static void unregisterActive(MCEFBrowser browser) {
-        ACTIVE.remove(browser);
-    }
-
-    /** 当前活跃浏览器数量（诊断用）。 */
-    public static int getActiveBrowserCount() {
-        return ACTIVE.size();
-    }
-
-    /**
-     * 每帧驱动所有浏览器：拉帧 + 上传纹理。
-     *
-     * <p>由 {@code MCEFMod} 在 {@code RenderTickEvent} 的 START 阶段调用 ——
-     * 必须在 MC 真正绘制之前把纹理准备好，否则画的是上一帧或空纹理。</p>
-     */
-    public static void tickAll() {
-        if (ACTIVE.isEmpty()) return;
-        for (MCEFBrowser b : ACTIVE) {
-            try {
-                b.tick();
-            } catch (Throwable t) {
-                LOGGER.error("browser tick failed", t);
             }
         }
     }

@@ -87,15 +87,15 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
 
 ---
 
-## Java 版本死锁与解法
+## Java 版本
 
 ```
 MC 1.20.1  →  class v61 (Java 17)   ← 运行时必须能加载
 libmcef.so →  纯 native，无字节码   ← 无冲突
 ```
 
-现在这条其实不再是问题（不依赖 Cefrium 的 v69 类了），但构建仍**用 JDK 25 编译、
-输出 Java 17**：
+现在这条已经不是问题：本模块不再依赖 Cefrium 的 v69 类，ForgeGradle 解析来的
+依赖全是 v61。用任意 JDK 17+ 运行 Gradle 即可，输出固定为 Java 17：
 
 ```gradle
 java {
@@ -107,15 +107,15 @@ tasks.withType(JavaCompile).configureEach {
 }
 ```
 
-**为什么不能用 `--release 17`**：它把 API 视图切回 Java 17，一旦 classpath 里有
+**为什么不用 `--release 17`**：它把 API 视图切回 Java 17，一旦 classpath 里有
 更高版本的类就直接报 `class file has wrong version`。
 `-source/-target` 只约束输出，不限制输入。
 
 产物验证：
 
 ```
-$ od -An -tx1 -N8 build/classes/.../MCEFBrowser.class
- ca fe ba be 00 00 00 3d      ← 0x3d = 61 = Java 17 ✅
+$ od -An -tx1 -N8 build/classes/java/main/com/cinemamod/mcef/MCEFBrowser.class
+  ca fe ba be 00 00 00 3d      ← 0x3d = 61 = Java 17 ✅
 ```
 
 ---
@@ -208,7 +208,15 @@ public int getTextureID() {
 ### 1. 帧是轮询取的，不是回调
 
 纯 JVM 里没有 Android 的 UI 线程模型，CEF 的帧由启动器经 IPC 推进 libmcef 的缓存。
-所以 `MCEFBrowser.tick()` 每帧：
+
+驱动链路有三道闸，缺一条就会退化成递归或每帧数百次 JNI：
+
+1. `RenderTickEvent.START` 只做 `MCEFRenderer.beginMinecraftFrame()`（纯 Java 计数，
+   不碰 JNI、不碰 GL）。
+2. `getTextureID()` 用帧号去重：**同一浏览器同一 MC 帧最多 pump 一次**。
+3. `tick()` 内部一律用 `peekTextureID()` 检查纹理状态，**绝不回调 `getTextureID()`**，
+   并用 `AtomicBoolean` 防重入；`version <= 0` 或与 `lastVersion` 相同时直接返回，
+   不 copy、不 swap、不上传。
 
 ```
 getFrameInfo() → 版本号变了才 copyFrame() → MCEFRenderer.onPaint()
@@ -216,35 +224,24 @@ getFrameInfo() → 版本号变了才 copyFrame() → MCEFRenderer.onPaint()
 
 版本没变就零开销返回（省掉一次 3.5 MB 拷贝）。直接缓冲按需扩容并复用。
 
-### 2. 纹理上传：**不用** `GL_BGRA + GL_UNSIGNED_INT_8_8_8_8_REV`
+### 2. 纹理上传：`GL_BGRA + GL_UNSIGNED_INT_8_8_8_8_REV` + CPU 侧 R/B 交换
 
-上游 MCEF 用这个组合，桌面 GL 上正确。但在 **Android + MobileGlues** 上：
+CEF 给的是 BGRA。当前代码在 `MCEFRenderer.onPaint` 里先把每个像素的
+R/B 字节互换，再用 `glTexImage2D(..., GL_RGBA, w, h, 0, GL_BGRA,
+GL_UNSIGNED_INT_8_8_8_8_REV, buffer)` 上传。
 
-```
-signal 11 (SIGSEGV)
-C  [libmobileglues.so+0x5971f0]
-C  [libmobileglues.so+0x56b538]  glTexImage2D+0x9c
-J  org.lwjgl.opengl.GL11C.nglTexImage2D
-J  com.mojang.blaze3d.opengl.GlStateManager._texImage2D
-j  com.cinemamod.mcef.MCEFRenderer.onPaint
-```
+这个组合不是"按规范推出来"的，是实测出来的：
 
-`GL_BGRA` 不是 GLES core 的 format 枚举，MobileGlues 处理它时解引用空指针 ——
-**每帧上传都可能崩**。
+- `GL_RGBA + GL_UNSIGNED_BYTE` 在 MobileGlues / gl4es 上会崩在驱动内部拷贝
+  （`__memcpy_aarch64_simd`，`R2=0x1400` 正好是 1280×4 一行）。
+- `GL_BGRA + INT_8_8_8_8_REV` 是这条链路上不崩的组合。
+- 但直接传 BGRA 颜色是反的，说明该驱动路径实际按 RGBA 解释；因此先在 CPU
+  侧交换 R/B，让"按 RGBA 读"的结果正确。
 
-本实现：
+`swapRgbaInPlace` 按 `int` 批量交换（小端序 `0xAARRGGBB` → `0xAABBGGRR`）。
 
-```java
-glTexImage2D(..., GL_RGBA, GL_UNSIGNED_BYTE, null);   // GLES 原生组合
-swapRgbaInPlace(buffer, width * height);               // CPU 侧 BGRA→RGBA
-glTexSubImage2D(..., GL_RGBA, GL_UNSIGNED_BYTE, buffer);
-```
-
-`swapRgbaInPlace` 按 `int` 批量交换（小端序 `0xAARRGGBB` → `0xAABBGGRR`），
-88 万像素约 2~4ms。
-
-> **注意**：`MCEFBrowser.onPaint` 覆写点拿到的 buffer **已经是 RGBA**，
-> 不再是 JCEF 文档里说的 BGRA。
+> **注意**：`MCEFBrowser.onPaint` 覆写点拿到的 buffer **已经过 R/B 交换**，
+> 与 JCEF 文档里描述的原始 BGRA 不同。
 
 ### 3. GL 状态卫生：不碰 `GL_UNPACK_ROW_LENGTH`
 
@@ -266,7 +263,7 @@ GL 状态缓存。绕过它直接用 `glBindTexture` 会让缓存与实际状态
 | 功能 | 状态 | 原因 |
 |---|---|---|
 | **`resize`** | ⚠️ 仅本地记录 | Cefrium 无 resize API（`mcef_resize` 是空操作），帧尺寸固定于创建时 |
-| **纹理尺寸** | ⚠️ 默认钳到 512×512 | 见下节「纹理尺寸限制」 |
+| **纹理尺寸** | ✅ 默认按请求尺寸 | 可用 `-Dmcef.maxDim=N` 限制最长边，按比例等比缩放（1280×720 → 512×288） |
 | **标题回调** | ❌ 空实现 | IPC 桥没有同步/异步取标题的通道 |
 | **光标类型回调** | ❌ 不触发 | 桥未暴露 cursor 回调 |
 | **`sendQuery`（native→页面）** | ❌ 空实现 | 只有页面发起的方向可用 |
@@ -290,8 +287,7 @@ MCEF.scheduleForInit(app -> { /* ready */ });
 // 3) 建浏览器（透明 + 指定尺寸，WebDisplays 的屏幕这样用）
 MCEFBrowser browser = MCEF.createBrowser("https://example.com", true, 1280, 720);
 
-// 4) 每帧驱动
-browser.tick();
+// 4) 帧由 getTextureID() 内部按 MC 渲染帧限流拉取，无需手动 tick
 
 // 5) 渲染：取 GL 纹理 id 直接画
 int texId = browser.getRenderer().getTextureID();
@@ -307,29 +303,38 @@ RenderSystem._setShaderTexture(0, texId);
 ## 构建
 
 ```bash
-# 必须 JDK 25（-source/-target 17 的输出靠它）
-JAVA_HOME=/path/to/jdk-25 ./gradlew jar
+./gradlew build          # 产物：build/libs/mcef-forge-2.1.1-1.20.1-android.jar
 ```
 
-产物：`build/libs/mcef-forge-2.1.1-1.20.1-android.jar`（约 79 KB，含 so）
+运行 Gradle 的 JVM 需要 **JDK 17 或更高**；输出始终是 Java 17 字节码（MC 1.20.1 的 class 是 v61）。
 
-`libs/` 里的依赖（全部 `compileOnly`，不进产物）：
+### 干净 clone 为什么能构建
 
-| 文件 | 用途 |
-|---|---|
-| `minecraft-1.20.1-mapped.jar` | MC 1.20.1（v61），Forge 映射版 |
-| `lwjgl-3.3.3.jar` / `lwjgl-opengl-3.3.3.jar` | GL 调用 |
-| `log4j-api-*.jar` | 日志 |
+早先这棵树依赖一个被 `.gitignore` 排除的 `libs/` 目录，干净 clone 直接构建失败。
+现在改为 ForgeGradle 6.0.54 从 Maven 解析依赖：
+
+```gradle
+plugins {
+    id 'java-library'
+    id 'net.minecraftforge.gradle' version '6.0.54'
+}
+minecraft { mappings channel: 'official', version: '1.20.1' }
+dependencies {
+    minecraft 'net.minecraftforge:forge:1.20.1-47.4.0'
+}
+```
+
+`libs/` 保留为**可选**的本地覆盖入口（例如临时替换某个 jar），目录不存在也不会报错。
+Gradle wrapper 已进版本库（`gradle-wrapper.jar` 在 `.gitignore` 里单独放行），
+首次构建会下载 Gradle 8.8 与 MC/Forge 依赖。
 
 > 不需要 Cefrium SDK —— 它跑在启动器进程里，MC 侧只认 `libmcef.so`。
 
 ### so 的加载
 
-`McefNative` 静态块按两条路试：
-
-1. `System.loadLibrary("mcef")` —— 启动器已把 so 放进 APK 的 `lib/arm64`，
-   而 `java.library.path` 包含它，这是最快路径；
-2. 从 jar 内 `/natives/arm64-v8a/libmcef.so` 解压到临时目录再 `System.load(绝对路径)`。
+`McefNative` 只走 `System.loadLibrary("mcef")`：启动器已把 so 放进 APK 的
+`lib/arm64-v8a/`，`java.library.path` 包含它。**不从 jar 解压** —— Android 上
+临时目录常挂 `noexec`，解压出来的 `.so` 会 `dlopen` 失败。
 
 加载来源记录在 `McefNative.getLoadedFrom()`，诊断时先看它。
 
@@ -341,8 +346,8 @@ JAVA_HOME=/path/to/jdk-25 ./gradlew jar
 |---|---|---|
 | 底层 | JCEF → libcef（桌面 C++） | libmcef.so → IPC → 启动器 Cefrium |
 | 平台 | 桌面（Windows/Mac/Linux） | **仅 Android**（需 Android 启动器） |
-| 纹理格式 | `GL_BGRA + INT_8_8_8_8_REV` | `GL_RGBA + UNSIGNED_BYTE` + CPU 交换 |
-| `onPaint` 的 buffer | BGRA | **RGBA**（已交换） |
+| 纹理格式 | `GL_BGRA + INT_8_8_8_8_REV` 直传 | 同组合 + CPU 侧 R/B 交换（驱动读法不同） |
+| `onPaint` 的 buffer | BGRA | 已交换 R/B |
 | 引擎初始化 | MCEF 自己下载/加载 libcef | 启动器负责，MC 侧只连 IPC |
 | JNI 绑定 | 无 | `JNI_OnLoad` 动态注册（符号名不含包名） |
 | 编译 | JDK 17 | **JDK 25 编译 → 输出 Java 17** |
@@ -351,20 +356,43 @@ JAVA_HOME=/path/to/jdk-25 ./gradlew jar
 
 ## 相关项目
 
-- `../ZalithLauncher2-main/native/mcef_bridge/` —— `libmcef.so` 源码（本项目改了 JNI 注册方式）
-- `../WDmod-网页mod/` —— WebDisplays 源码（消费方）
-- `../mcef-android/` —— 同一套 JCEF API 的 MC 26.1.2 版本（直连 Cefrium，仅作参考）
+- [libmcef 源码](https://github.com/RainClay/Mcef-Android/tree/libmcef-source) —— `libmcef.so` 的 C++/JNI 实现（本仓库 `libmcef-source` 分支）
+- [启动器集成源码](https://github.com/RainClay/Mcef-Android/tree/launcher-integration) —— Cefrium Host 侧（本仓库 `launcher-integration` 分支）
+- [WebDisplays](https://github.com/CinemaMod/webdisplays)（MIT）—— 消费方，API 面按它的字节码引用裁剪
+- [CinemaMod MCEF](https://github.com/CinemaMod/mcef)（LGPL-2.1）—— 同类项目的桌面实现，本项目未复用其代码
+
+---
+
+## 与上游的关系
+
+- `org.cef.*`（22 类）：按 JCEF（Chromium/CEF，BSD-3-Clause）的公开 API
+  独立实现，非拷贝。Android 上没有 JCEF 的 Java 运行时，这一层必须重写。
+- `com.cinemamod.mcef.*`（7 类）：**独立实现**，不是 [CinemaMod MCEF]
+  (https://github.com/CinemaMod/mcef)（LGPL-2.1）的衍生作品。
+  类名、包名、方法名刻意保持与上游一致，只为满足 WebDisplays 的字节码引用；
+  不包含上游任何源码、注释或实现逻辑。
+
+  兼容面的确定方式：从 WebDisplays 2.0.2 的 jar 中提取字节码引用，
+  得到 22 类 / 42 成员；本项目实现的公共 API 面即以此为界。
+
+  如需自行核验：`javap -p -c` 提取 WebDisplays 的引用，与本项目 public 成员比对；
+  或对比本仓库与上游的私有字段集合、字符串字面量集合（应为空交集）。
+- `libmcef`（C++/JNI）与 `launcher-integration`（源与上游的部分更改后代码）：本项目原创。
 
 ---
 
 ## 许可证
 
-本分支按仓库根目录的 [GPL-3.0](LICENSE) 发布；此 README 原先写的「保留所有权利」不正确，已更正。
+| 组件 | 上游许可证 | 本仓库状态 | 处理 |
+|---|---|---|---|
+| `org.cef.*`（22 类） | JCEF / CEF，BSD-3-Clause | 独立实现 | 标 GPL-3.0 + 独立性声明 |
+| `com.cinemamod.mcef.*`（7 类） | LGPL-2.1-or-later | 独立实现（API 兼容） | 标 GPL-3.0 + 独立性声明，不写 LGPL |
+| `MCEFMod` / `McefNative` | — | 原创 | 标 GPL-3.0 |
+| `native/mcef_bridge/` | — | 原创 | 标 GPL-3.0 |
+| `launcher-integration` 3 个 Zalith 原文件 | GPL-3.0 | 改编 | 保留原头 + `Modified by` |
+| `launcher-integration` 3 个新文件 | — | 原创 | 标 GPL-3.0 |
+| Cefrium 二进制 | 未知 | **不分发** | 不随仓库分发，由启动器运行时下载 |
+| WebDisplays | MIT | 消费方 | 无需动作 |
 
-第三方组件仍按各自许可证：
+本分支整体按 [GPL-3.0](LICENSE) 发布。第三方组件的原始版权与许可声明保留在各文件头中。
 
-- Chromium / CEF / JCEF 相关 API 与实现：以各自源码和发行物附带的许可证为准（常见为 BSD）。
-- CinemaMod 上游 MCEF：LGPL-2.1；本分支如包含或修改其受版权保护代码，须遵守上游许可证及其适用的源代码提供义务。
-- Zalith Launcher 集成源码（`launcher-integration` 分支）：遵从 Zalith Launcher 仓库 GPL-3.0 许可证，并保留对应版权声明。
-
-本仓库的兼容层和 Android/Forge 适配代码不改变上述第三方组件的许可证。请以仓库内 LICENSE 文件及具体文件头的版权/许可证声明为准。

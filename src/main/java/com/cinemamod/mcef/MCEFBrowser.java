@@ -1,3 +1,26 @@
+/*
+ * MCEF-Android (Forge 1.20.1)
+ * Copyright (C) 2026 Rain_Clay and contributors
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * PROVENANCE: independent implementation, not a derivative work of
+ * CinemaMod MCEF (LGPL-2.1). Names are kept identical only to satisfy
+ * WebDisplays bytecode references; no upstream source, comments or
+ * implementation logic is included. See README "与上游的关系".
+ */
+
 package com.cinemamod.mcef;
 
 import com.cinemamod.mcef.listeners.MCEFCursorChangeListener;
@@ -12,6 +35,7 @@ import org.cef.browser.CefBrowserOsr;
 
 import java.awt.Rectangle;
 import java.nio.ByteBuffer;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * MCEFBrowser —— 把 {@link McefNative}（libmcef.so 的 JNI 绑定）包装成 JCEF 的
@@ -69,14 +93,11 @@ public class MCEFBrowser extends CefBrowserOsr {
     private ByteBuffer frameBuffer;
     private int frameBufferCapacity;
 
-    /** 上次已知的帧版本；相同则跳过拷贝。 */
+    /** frame pump 防重入：texture getter → tick → 纹理上传期间不得再次进入 tick。 */
+    private final AtomicBoolean pumping = new AtomicBoolean(false);
+
+    /** 上次成功上传的帧版本；相同则跳过 JNI copyFrame 和纹理上传。 */
     private int lastVersion = -1;
-
-    /** tick 被调用次数；用于确认 getTextureID 还在驱动。 */
-    private int tickCount = 0;
-
-    /** 版本变化次数；用于确认 IPC 还在送新帧。 */
-    private int versionChanges = 0;
 
     public MCEFBrowser(MCEFClient client, String url, boolean transparent) {
         this(client, url, transparent, DEFAULT_WIDTH, DEFAULT_HEIGHT, true);
@@ -96,31 +117,16 @@ public class MCEFBrowser extends CefBrowserOsr {
         this.viewWidth = Math.max(1, width);
         this.viewHeight = Math.max(1, height);
 
-        // ── 纹理尺寸：向上取整到 2 的幂（POT）并限制上限 ────────────────
-        //
-        // 实测：1280x720（NPOT、3.6 MB）时 gl4es 的纹理上传会崩在内部 memcpy
-        // （si_addr 落在页边界、R2=0x1400 正好是 1280*4 一行）。
-        // 但崩溃前能显示出一帧白底，说明链路本身是通的，问题出在 gl4es 对
-        // 大尺寸 NPOT 纹理的处理上。
-        //
-        // gl4es 对 POT 纹理走硬件路径（不需要临时缓冲做格式转换/降采样），
-        // 因此这里统一取 POT 上限，规避它的 NPOT 分支。
-        // 画面会被拉伸（WebDisplays 用 UV 0..1 采样整张纹理），但先保证不崩。
-        //
-        // 可用 -Dmcef.maxDim=N 调整上限（必须是 2 的幂才有效果）。
-        // 固定 512：实测档位（同一份代码、MobileGlues 渲染器）
-        //   512x512  → 正常渲染出网页内容
-        //   1024x1024 → 崩
-        //   1280x720  → 崩（libmobileglues glTexImage2D，R2=1280*4 正好一行）
-        //
-        // 也就是说 MobileGlues 对大纹理上传有硬上限。512 是已验证可用的档位，
-        // 先固定在这里保证功能可用；提高清晰度需要等驱动修，或改成分块上传。
-        //
-        // 想自己试更大尺寸：-Dmcef.maxDim=768（崩了就退回 512）
-        final int maxDim = Integer.getInteger("mcef.maxDim", 512);
+        // 可选的尺寸上限；默认不限制，并按比例缩放，绝不把宽高分别 clamp 成正方形。
+        // 例如 1280x720 限制最长边 512 后变成 512x288，保持 16:9。
+        final int maxDim = Integer.getInteger("mcef.maxDim", 0);
         if (maxDim > 0) {
-            if (this.viewWidth > maxDim) this.viewWidth = maxDim;
-            if (this.viewHeight > maxDim) this.viewHeight = maxDim;
+            final int longest = Math.max(this.viewWidth, this.viewHeight);
+            if (longest > maxDim) {
+                final double scale = (double) maxDim / longest;
+                this.viewWidth = Math.max(1, (int) Math.round(this.viewWidth * scale));
+                this.viewHeight = Math.max(1, (int) Math.round(this.viewHeight * scale));
+            }
         }
 
         this.renderer = new MCEFRenderer(transparent);
@@ -142,10 +148,6 @@ public class MCEFBrowser extends CefBrowserOsr {
             LOGGER.error("createBrowser threw", t);
         }
         this.handle = h;
-
-        // 登记到 MCEF 的活跃表：RenderTickEvent 会每帧轮询它来拉帧 + 上传纹理。
-        // 不登记的话纹理永远是空的（WebDisplays 不会主动 tick）。
-        MCEF.registerActive(this);
 
         if (handle <= 0) {
             LOGGER.error("createBrowser failed: handle={} lastError={}", handle, safeLastError());
@@ -263,90 +265,58 @@ public class MCEFBrowser extends CefBrowserOsr {
     // ── 每帧驱动 ───────────────────────────────────────────────────────────
 
     /**
-     * 拉取并上传最新帧。由渲染线程每帧调用。
-     *
-     * <p>先问版本号，没变就返回（省掉一次 3.5 MB 拷贝）；直接缓冲按需扩容并复用。</p>
+     * 拉取并上传最新帧。由 renderer 的 frame-gated beforeUse 回调调用，
+     * 同一浏览器同一 MC 渲染帧最多进入一次。
      */
     public void tick() {
-        if (handle <= 0) return;
-
-        // 纹理由这里懒创建。
-        //
-        // GL 纹理必须在<b>渲染线程且 GL 上下文有效</b>时创建，而本方法正是被
-        // RenderTickEvent(START) 驱动的 —— 那时上下文一定有效。
-        // 放在构造里不行（构造可能发生在 mod 加载线程）。
-        //
-        // 漏了这一步的后果：onPaint 每次都在 textureId==0 时直接 return，
-        // 于是 Host 那边渲染了几千帧，MC 侧一帧都没上传，屏幕永远是黑的。
-        if (renderer.getTextureID() == 0) {
-            renderer.initialize();
-            if (renderer.getTextureID() == 0) {
-                return;   // 创建失败，下一帧再试
-            }
-        }
-
-        int[] info;
+        if (handle <= 0 || !pumping.compareAndSet(false, true)) return;
         try {
-            info = McefNative.getFrameInfo(handle);
-        } catch (Throwable t) {
-            LOGGER.error("getFrameInfo threw", t);
-            return;
-        }
-        if (info == null || info.length < 5 || info[0] != McefNative.OK) return;
-
-        final int w = info[1];
-        final int h = info[2];
-        final int stride = info[3];
-        final int version = info[4];
-
-        if (w <= 0 || h <= 0 || stride < w * 4) return;
-        tickCount++;
-        if (tickCount % 60 == 0) {
-            // 每 60 次 tick 一条。三个数一起看就能定位断点：
-            //   tickCount 不涨        → getTextureID 没被调用（屏幕没在渲染）
-            //   version == lastVersion → 桥没收到新帧（IPC 断了）
-            //   version 在涨但没上传   → 上传被跳过（尺寸/防御检查）
-            LOGGER.info("tick #{} handle={} ver={} last={} {}x{} stride={}",
-                    tickCount, handle, version, lastVersion, w, h, stride);
-        }
-        if (version == lastVersion) return;
-
-        if (versionChanges < 20) {
-            versionChanges++;
-            LOGGER.info("frame version {} -> {} ({}x{})", lastVersion, version, w, h);
-        }
-
-        final int bytes = stride * h;
-        if (frameBuffer == null || frameBufferCapacity < bytes) {
-            frameBuffer = ByteBuffer.allocateDirect(bytes);
-            frameBufferCapacity = bytes;
-        }
-        frameBuffer.clear();
-        frameBuffer.limit(bytes);
-
-        final int rc = McefNative.copyFrame(handle, frameBuffer);
-        if (rc != McefNative.OK) {
-            if (rc != McefNative.ERR_NOT_FOUND) {
-                LOGGER.warn("copyFrame failed rc={}", rc);
+            if (renderer.peekTextureID() == 0) {
+                renderer.initialize();
+                if (renderer.peekTextureID() == 0) return;
             }
-            return;
-        }
-        lastVersion = version;
 
-        frameBuffer.position(0);
-        frameBuffer.limit(bytes);
+            final int[] info = McefNative.getFrameInfo(handle);
+            if (info == null || info.length < 5 || info[0] != McefNative.OK) return;
+            final int w = info[1];
+            final int h = info[2];
+            final int stride = info[3];
+            final int version = info[4];
+            if (w <= 0 || h <= 0 || stride < w * 4) return;
 
-        try {
+            // version=0 是 native bridge 初始化时的全透明占位帧，不复制、不上传。
+            if (version <= 0 || version == lastVersion) return;
+
+            final long bytesLong = (long) stride * h;
+            if (bytesLong <= 0 || bytesLong > Integer.MAX_VALUE) return;
+            final int bytes = (int) bytesLong;
+            if (frameBuffer == null || frameBufferCapacity < bytes) {
+                frameBuffer = ByteBuffer.allocateDirect(bytes);
+                frameBufferCapacity = bytes;
+            }
+            frameBuffer.clear();
+            frameBuffer.limit(bytes);
+
+            final int rc = McefNative.copyFrame(handle, frameBuffer);
+            if (rc != McefNative.OK) {
+                if (rc != McefNative.ERR_NOT_FOUND) LOGGER.warn("copyFrame failed rc={}", rc);
+                return;
+            }
+            frameBuffer.position(0);
+            frameBuffer.limit(bytes);
             renderer.onPaint(frameBuffer, w, h);
-        } catch (Throwable t) {
-            LOGGER.error("texture upload failed", t);
-            return;
-        }
 
-        try {
-            onPaint(this, false, new Rectangle[]{new Rectangle(0, 0, w, h)}, frameBuffer, w, h);
+            try {
+                onPaint(this, false, new Rectangle[]{new Rectangle(0, 0, w, h)}, frameBuffer, w, h);
+            } catch (Throwable t) {
+                LOGGER.error("onPaint hook failed", t);
+            }
+            // 只在成功上传后推进版本；若 GL 上传失败，下次取纹理时允许重试同一帧。
+            lastVersion = version;
         } catch (Throwable t) {
-            LOGGER.error("onPaint hook failed", t);
+            LOGGER.error("browser frame pump failed handle={}", handle, t);
+        } finally {
+            pumping.set(false);
         }
     }
 
@@ -425,7 +395,6 @@ public class MCEFBrowser extends CefBrowserOsr {
     @Override
     public void close(boolean force) {
         closing = true;
-        MCEF.unregisterActive(this);
         if (handle > 0) {
             McefNative.destroyBrowser(handle);
         }

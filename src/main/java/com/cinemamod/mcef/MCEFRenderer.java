@@ -1,3 +1,26 @@
+/*
+ * MCEF-Android (Forge 1.20.1)
+ * Copyright (C) 2026 Rain_Clay and contributors
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * PROVENANCE: independent implementation, not a derivative work of
+ * CinemaMod MCEF (LGPL-2.1). Names are kept identical only to satisfy
+ * WebDisplays bytecode references; no upstream source, comments or
+ * implementation logic is included. See README "与上游的关系".
+ */
+
 package com.cinemamod.mcef;
 
 import com.mojang.blaze3d.systems.RenderSystem;
@@ -16,10 +39,10 @@ import static org.lwjgl.opengl.GL12.GL_CLAMP_TO_EDGE;
 /**
  * MCEFRenderer —— 把 CEF 的帧上传成一张 GL 纹理，供 MC 渲染。
  *
- * <p>上游 CinemaMod 的实现用 {@code glTexImage2D(GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV)}。
- * <b>在 Android + MobileGlues 上这会崩</b>（hs_err: libmobileglues glTexImage2D+0x9c），
- * 所以这里改成 GLES 原生的 {@code GL_RGBA + GL_UNSIGNED_BYTE}，并在 CPU 侧把
- * BGRA 交换成 RGBA。</p>
+ * <p>CEF 提供 BGRA 帧。本实现上传时使用
+ * {@code GL_BGRA + GL_UNSIGNED_INT_8_8_8_8_REV}，并在 CPU 侧交换 R/B；这是当前
+ * Android 驱动组合上实测可显示且颜色正确的路径。格式和驱动行为如有变化，须在
+ * MobileGlues 与 gl4es 上分别实测，不可只凭 GLES 规范推断。</p>
  *
  * <h3>为什么走 RenderSystem 而不是裸 GL</h3>
  * <p>MC 1.20.1 的 {@code RenderSystem} 提供 {@code bindTexture} / {@code texParameter}
@@ -101,22 +124,9 @@ public class MCEFRenderer {
 
         com.mojang.blaze3d.platform.GlStateManager._bindTexture(textureId[0]);
 
-        // 上传格式用 GL_BGRA + GL_UNSIGNED_INT_8_8_8_8_REV —— 上游 mcef 的原始组合。
-        //
-        // 为什么不换 GL_RGBA + GL_UNSIGNED_BYTE（GLES 原生）：在 MobileGlues /
-        // gl4es 这条路上，那个组合会崩在驱动内部 memcpy：
-        //   si_signo: 11 (SIGSEGV); R2 = 0x1400 (= 1280*4, 正好一行)
-        //   __memcpy_aarch64_simd ← glTexImage2D / glTexSubImage2D ← onPaint
-        // 源地址有效、崩的是驱动内部的拷贝目标 —— 驱动实现问题，换 API 没用。
-        //
-        // GL_BGRA + INT_8_8_8_8_REV 是唯一不崩的上传组合。
-        //
-        // 但实测颜色是反的（红蓝互换）—— 说明这条路上驱动并没有按 GL_BGRA
-        // 的语义处理，而是当 GL_RGBA 读了。CEF 给的是 [B][G][R][A]，
-        // 按 RGBA 读就变成 R=B、B=R。
-        //
-        // 所以在 CPU 侧先把字节换成 [R][G][B][A]，让「按 RGBA 读」的结果正好
-        // 正确。格式参数仍写 GL_BGRA，是为了继续走不崩的那条路径。
+        // CEF buffer 为 BGRA；先交换 R/B，再通过已验证的 GL_BGRA / REV 路径上传。
+        // 该适配针对当前驱动实测：不交换时画面红蓝通道反转；交换后通道正确。
+        // 不要把这段注释简化成“驱动忽略 GL_BGRA”，具体行为依赖渲染器实现。
         swapRgbaInPlace(buffer, width * height);
         buffer.position(0);
 
@@ -141,23 +151,27 @@ public class MCEFRenderer {
         }
     }
 
+    /** 由 RenderTickEvent.START 递增的纯 Java 帧序号；不在事件里做 JNI 或 GL。 */
+    private static volatile long minecraftFrameId;
+
+    public static void beginMinecraftFrame() {
+        minecraftFrameId++;
+    }
+
     /**
-     * 取 GL 纹理 id。
+     * 取 GL 纹理 id。这是帧上传的驱动点，不是 RenderTickEvent。
      *
-     * <p><b>这里是帧上传的驱动点</b>，不是 RenderTickEvent。</p>
+     * <p>WebDisplays 的 ScreenRenderer 会调本方法，紧接着
+     * {@code RenderSystem._setShaderTexture(0, texId)} 采样；此刻 GL 正处在
+     * 「准备画这张纹理」的完整状态，上传最安全。在 RenderTickEvent.START
+     * 里上传反而会让 MobileGlues 在 glTexImage2D 段错误。</p>
      *
-     * <p>原因：WebDisplays 的 ScreenRenderer 渲染屏幕方块时会调
-     * {@code getRenderer().getTextureID()}，然后立刻
-     * {@code RenderSystem._setShaderTexture(0, texId)} 采样 —— 调这个方法的
-     * 时刻，GL 正处于「准备画这张纹理」的完整状态。</p>
-     *
-     * <p>之前改用 RenderTickEvent.START 上传，那是帧的最开始，MC 可能还在切
-     * FBO、用别的 texture unit，结果在 MobileGlues 上 glTexImage2D 直接段错误
-     * （libmobileglues+0x5971f0）。</p>
+     * <p>每个浏览器每个 Minecraft 渲染帧最多 pump 一次，内部一律用
+     * {@link #peekTextureID()}，绝不回调本方法。</p>
      */
     public int getTextureID() {
         final Runnable pump = beforeUse;
-        if (pump != null) {
+        if (pump != null && claimPumpForFrame(minecraftFrameId)) {
             try {
                 pump.run();
             } catch (Throwable t) {
@@ -165,6 +179,19 @@ public class MCEFRenderer {
             }
         }
         return textureId[0];
+    }
+
+    /** 不触发 pump 的裸纹理 id，只用于内部初始化检查，防止 getTextureID→tick 递归。 */
+    public int peekTextureID() {
+        return textureId[0];
+    }
+
+    private long lastPumpFrameId = Long.MIN_VALUE;
+
+    private synchronized boolean claimPumpForFrame(long frameId) {
+        if (lastPumpFrameId == frameId) return false;
+        lastPumpFrameId = frameId;
+        return true;
     }
 
     /** 由 MCEFBrowser 注入：纹理被取用前同步最新帧。 */
