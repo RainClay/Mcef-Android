@@ -40,3 +40,6 @@ libs/
 
 # 本地配置（可能含签名口令）
 local.properties
+
+# test-builds 分支：测试包产物需要进版本库供下载
+!test-builds/**

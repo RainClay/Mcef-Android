@@ -303,7 +303,7 @@ RenderSystem._setShaderTexture(0, texId);
 ## 构建
 
 ```bash
-./gradlew build          # 产物：build/libs/mcef-forge-2.1.1-1.20.1-android.jar
+./gradlew build          # 产物：build/libs/mcef-forge-2.2.0-1.20.1-android.jar
 ```
 
 运行 Gradle 的 JVM 需要 **JDK 17 或更高**；输出始终是 Java 17 字节码（MC 1.20.1 的 class 是 v61）。

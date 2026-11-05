@@ -105,13 +105,58 @@ public final class McefNative {
      * 避免只看到一个干巴巴的 "no mcef in java.library.path"。</p>
      */
     private static void load() {
-        // so 由启动器打进 APK 的 lib/arm64-v8a/，java.library.path 里就能找到。
-        //
-        // 不从 jar 解压：Android 上 /data/local/tmp 之类常用临时目录常挂 noexec，
-        // System.load 解压出来的 .so 会失败；而 APK 里的 so 是安装时由系统解压到
-        // app 私有 lib 目录的，权限和数据目录都正确。
-        System.loadLibrary("mcef");
-        loadedFrom = "java.library.path";
+        // 1) 启动器已经把 so 放进 APK 的 lib/arm64-v8a/，java.library.path 里就能找到。
+        try {
+            System.loadLibrary("mcef");
+            loadedFrom = "java.library.path";
+            return;
+        } catch (UnsatisfiedLinkError first) {
+            // 2) 测试包场景：so 跟 mod 一起放在 jar 的 natives/arm64-v8a/ 下。
+            //    解压到 app 私有目录再 System.load。用 java.io.tmpdir 而不是
+            //    /data/local/tmp —— 后者在多数设备上挂 noexec，dlopen 会失败。
+            try {
+                loadedFrom = extractAndLoad();
+                return;
+            } catch (Throwable second) {
+                final UnsatisfiedLinkError err = new UnsatisfiedLinkError(
+                        "libmcef.so 加载失败；"
+                                + "loadLibrary(\"mcef\") → " + first.getMessage()
+                                + "；jar 解压 → " + second);
+                err.initCause(second);
+                throw err;
+            }
+        }
+    }
+
+    /** 从 jar 内的 natives/arm64-v8a/libmcef.so 解压并加载，返回实际路径。 */
+    private static String extractAndLoad() throws IOException {
+        final String res = "/natives/arm64-v8a/libmcef.so";
+        final File dir = new File(System.getProperty("java.io.tmpdir", "."), "mcef-natives");
+        if (!dir.exists() && !dir.mkdirs() && !dir.isDirectory()) {
+            throw new IOException("无法创建目录: " + dir);
+        }
+        final File so = new File(dir, "libmcef-" + BuildStamp.VALUE + ".so");
+        if (!so.exists() || so.length() == 0) {
+            try (InputStream in = McefNative.class.getResourceAsStream(res)) {
+                if (in == null) {
+                    throw new IOException("jar 内没有 " + res);
+                }
+                try (OutputStream out = new FileOutputStream(so)) {
+                    final byte[] buf = new byte[64 * 1024];
+                    int n;
+                    while ((n = in.read(buf)) > 0) {
+                        out.write(buf, 0, n);
+                    }
+                }
+            }
+        }
+        System.load(so.getAbsolutePath());
+        return so.getAbsolutePath();
+    }
+
+    /** jar 内 so 的版本标记，改 so 时同步改这里，避免复用旧的解压文件。 */
+    private static final class BuildStamp {
+        static final String VALUE = "2.2.0";
     }
 
     /** so 是从哪里加载的（"java.library.path" 或临时文件路径）。 */
