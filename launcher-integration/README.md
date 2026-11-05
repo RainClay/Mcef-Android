@@ -21,4 +21,22 @@ The host listens on `127.0.0.1:39090`. The Minecraft JVM side is a regular OpenJ
 
 ## License and attribution
 
-These files are copied or adapted from Zalith Launcher, whose repository is licensed under the **GNU General Public License v3.0 (GPL-3.0)**. This launcher integration overlay is provided under GPL-3.0; see [`LICENSE-ZalithLauncher-GPL-3.0`](LICENSE-ZalithLauncher-GPL-3.0). Existing source-file copyright/license notices are retained. Third-party dependencies, including Cefrium and Chromium, remain under their own licenses; this overlay does not relicense them.
+These files are copied or adapted from Zalith Launcher, whose repository is licensed
+under the **GNU General Public License v3.0 (GPL-3.0)**. This launcher integration
+overlay is provided under GPL-3.0; see [`LICENSE-ZalithLauncher-GPL-3.0`](LICENSE-ZalithLauncher-GPL-3.0).
+
+| 文件 | 来源 | 处理 |
+|---|---|---|
+| `ZLApplication.kt` | Zalith 原文件 | 保留原头 + `Modified by` |
+| `setting/AllSettings.kt` | Zalith 原文件 | 保留原头 + `Modified by` |
+| `ui/.../LauncherSettingsScreen.kt` | Zalith 原文件 | 保留原头 + `Modified by` |
+| `mcef/CefriumHostService.kt` | Zalith 原文件 | 保留原头 + `Modified by` |
+| `mcef/CefriumNativeLib.kt` | 新增 | GPL-3.0 头 |
+| `mcef/CefriumDownloader.kt` | 新增 | GPL-3.0 头 |
+| `ui/.../CefEngineSettingsCard.kt` | 新增 | GPL-3.0 头 |
+
+GPL-3.0 §5(a) 要求标注修改：改编文件头部均带 `Modified by Rain_Clay, 2026-11`，
+原始版权与许可声明原样保留。
+
+第三方依赖（Cefrium、Chromium/CEF）仍按其自身许可证执行，本 overlay 不改变其许可，
+也不分发 Cefrium 二进制。

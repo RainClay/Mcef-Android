@@ -3,6 +3,12 @@
  *
  * 作用：运行在 Zalith Android 进程内，提供 Android Context / Looper / Manifest
  * 环境，承接 libmcef.so 从 Minecraft 侧发来的 IPC 命令，并驱动 CefriumBrowser。
+ *
+ * Modified by Rain_Clay, 2026-11: MCEF/Cefrium 内置浏览器宿主集成
+ *   （Cefrium 原生库预加载、IPC host、按需下载与设置项）。
+ *
+ * 本文件位于 Zalith Launcher 源码树内，按 GPL-3.0-or-later 发布；
+ * 修改部分同样按 GPL-3.0-or-later 发布。
  */
 package com.movtery.zalithlauncher.mcef
 

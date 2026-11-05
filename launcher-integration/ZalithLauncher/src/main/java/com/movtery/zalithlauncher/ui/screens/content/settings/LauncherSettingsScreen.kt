@@ -14,7 +14,11 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/gpl-3.0.txt>.
- */
+ *
+ * Modified by Rain_Clay, 2026-11: MCEF/Cefrium 内置浏览器宿主集成
+ *   （Cefrium 原生库预加载、IPC host、按需下载与设置项）。
+ *   原始版权与 GPL-3.0 许可声明见上方，修改部分同样按 GPL-3.0 发布。
+*/
 
 package com.movtery.zalithlauncher.ui.screens.content.settings
 
