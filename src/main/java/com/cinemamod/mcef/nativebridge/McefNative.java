@@ -49,9 +49,17 @@ import java.nio.ByteBuffer;
  * </pre>
  *
  * <h3>so 的加载方式</h3>
- * <p>由启动器把 libmcef.so 打进 APK 的 {@code lib/arm64-v8a/}，本类只调
- * {@code System.loadLibrary("mcef")}。不在 jar 里塞 so —— Android 上临时目录
- * 常挂 noexec，从 jar 解压再 System.load 会失败。</p>
+ * <p>两级，按顺序试：</p>
+ * <ol>
+ *   <li>启动器把 libmcef.so 打进 APK 的 {@code lib/arm64-v8a/}，
+ *       {@code System.loadLibrary("mcef")} 直接命中 —— 这是常规路径；</li>
+ *   <li>没有预置时，从 mod jar 内的 {@code /natives/arm64-v8a/libmcef.so}
+ *       解压到 {@code java.io.tmpdir} 再 {@code System.load} —— 这条是为
+ *       自带 so 的独立分发包准备的。</li>
+ * </ol>
+ *
+ * <p>解压目标必须是可执行的目录。{@code /data/local/tmp} 在多数 Android 设备上
+ * 挂 {@code noexec}，{@code dlopen} 会失败，所以用 {@code java.io.tmpdir}。</p>
  *
  * <h3>包名为什么能随便定</h3>
  * <p>libmcef.so 用 {@code JNI_OnLoad + RegisterNatives} 动态注册，符号名里不含包名。

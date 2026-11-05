@@ -59,12 +59,16 @@ tasks.withType(JavaCompile).configureEach {
     options.compilerArgs << '-Xlint:-deprecation' << '-Xlint:-unchecked' << '-Xlint:-options'
 }
 
-// jar 里不含 libmcef.so。
+// so 的两种打包方式（对应 McefNative.load() 的两级回退）：
 //
-// so 由启动器打进 APK 的 lib/arm64-v8a/，MC 侧 System.loadLibrary("mcef")
-// 直接加载。不从 jar 解压：Android 上临时目录常挂 noexec，解压出来的 .so
-// 会 dlopen 失败；而 APK 里的 so 由安装器解压到 app 私有 lib 目录，
-// 权限与 SELinux 上下文都是对的。
+//   A. 启动器预置：so 打进启动器 APK 的 lib/arm64-v8a/，
+//      System.loadLibrary("mcef") 直接命中。这是常规路径，jar 里不含 so。
+//   B. 独立分发：把 natives/arm64-v8a/libmcef.so 一起塞进 mod jar，
+//      加载时解压到 java.io.tmpdir 再 System.load。
+//      本仓库 1.20.1 分支的 test-builds/ 就是这种形态。
+//
+// 注意 B 的解压目录必须是可执行目录：/data/local/tmp 在多数 Android
+// 设备上挂 noexec，dlopen 会失败。
 jar {
     archiveBaseName = 'mcef-forge'
     manifest {
@@ -73,6 +77,20 @@ jar {
                 'Implementation-Title'   : project.name,
                 'Implementation-Version' : project.version,
         ])
+    }
+}
+
+// 打包 so 的开关：-PwithNative（默认关，走 A 路径）。
+// 打开时把 native/mcef_bridge 编出来的 so 放进 jar。
+if (project.hasProperty('withNative')) {
+    def soPath = file("${projectDir}/natives/arm64-v8a/libmcef.so")
+    if (!soPath.exists()) {
+        throw new GradleException("withNative 已开启但缺文件: ${soPath}")
+    }
+    jar {
+        from(projectDir) {
+            include 'natives/**'
+        }
     }
 }
 
