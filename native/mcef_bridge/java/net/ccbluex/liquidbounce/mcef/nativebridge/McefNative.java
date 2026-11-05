@@ -1,3 +1,25 @@
+/*
+ * libmcef —— MCEF 的 Android native 桥接层
+ * Copyright (C) 2026 Rain_Clay and contributors
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * PROVENANCE: original implementation. The class path
+ * net/ccbluex/liquidbounce/mcef/nativebridge is kept only as a JNI
+ * registration target for consumers; no LiquidBounce source is included.
+ */
+
 package net.ccbluex.liquidbounce.mcef.nativebridge;
 
 import java.nio.ByteBuffer;

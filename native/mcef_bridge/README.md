@@ -61,3 +61,12 @@ strings build/arm64-v8a/libmcef.so | grep -E 'JNI_OnLoad|McefNative'
 ## IPC 协议
 
 协议实现位于 `src/mcef_ipc_client.cpp` 和启动器侧 `CefriumHostService`。本分支不复制旧的 `docs/ipc_protocol.md`，以源码中的当前发送与解析逻辑为准。帧头解析会校验 `size == stride * height`，并调用 `mcef_host_set_frame` 更新缓存和版本号。
+
+## 许可证
+
+本目录为原创实现，按 **GPL-3.0-or-later** 发布（与本仓库根目录 [LICENSE](../../LICENSE) 一致）。
+各源文件头部带有完整 GPL-3.0 声明。
+
+JNI 注册目标保留 `net/ccbluex/liquidbounce/mcef/nativebridge/McefNative` 这一路径，
+仅为让同一份 `.so` 服务既有消费方；本目录不包含 LiquidBounce 的任何源码。
+Cefrium 与 Chromium 为第三方二进制，不随本仓库分发。
