@@ -207,6 +207,37 @@ jint jni_hostSetDomJson(JNIEnv* env, jclass, jlong browser, jstring json) {
     return mcef_host_set_dom_json(static_cast<mcef_browser_t>(browser), s.c_str());
 }
 
+// 取一条待处理的 JS 查询，打包成 [queryId, persistent, request, origin]。
+// 用 String[] 而不是自定义对象：JNI 侧构造对象要 FindClass + 构造器签名，
+// 一旦 Java 侧改了包名/字段就静默失败；数组没有这个问题。
+// 没有待处理查询时返回 null。
+jobjectArray jni_takeQuery(JNIEnv* env, jclass, jlong browser) {
+    mcef_query_t q{};
+    const int rc = mcef_take_query(static_cast<mcef_browser_t>(browser), &q);
+    if (rc != MCEF_OK) return nullptr;
+
+    jclass stringClass = env->FindClass("java/lang/String");
+    if (!stringClass) { mcef_free_query(&q); return nullptr; }
+    jobjectArray out = env->NewObjectArray(4, stringClass, nullptr);
+    if (!out) { mcef_free_query(&q); return nullptr; }
+
+    env->SetObjectArrayElement(out, 0, to_jstring(env, std::to_string(q.query_id)));
+    env->SetObjectArrayElement(out, 1, to_jstring(env, std::to_string(q.persistent)));
+    env->SetObjectArrayElement(out, 2, to_jstring(env, q.request ? q.request : ""));
+    env->SetObjectArrayElement(out, 3, to_jstring(env, q.origin ? q.origin : ""));
+    mcef_free_query(&q);
+    return out;
+}
+
+// 回填查询结果给 Host。
+jint jni_replyQuery(JNIEnv* env, jclass, jlong browser, jlong queryId,
+                    jboolean success, jstring result, jint errorCode) {
+    const std::string body = result ? to_string(env, result) : std::string();
+    return mcef_reply_query(static_cast<mcef_browser_t>(browser),
+                            static_cast<long long>(queryId),
+                            success ? 1 : 0, body.c_str(), errorCode);
+}
+
 // ── 方法表 ──────────────────────────────────────────────────────────────
 //
 // 签名必须与 Java 侧的 native 声明逐字一致，否则 RegisterNatives 返回
@@ -233,6 +264,8 @@ const JNINativeMethod kMethods[] = {
     {"getLastError",         "()Ljava/lang/String;",                                    (void*) jni_getLastError},
     {"hostSetFrame",         "(JLjava/nio/ByteBuffer;III)I",                            (void*) jni_hostSetFrame},
     {"hostSetDomJson",       "(JLjava/lang/String;)I",                                  (void*) jni_hostSetDomJson},
+    {"takeQuery",            "(J)[Ljava/lang/String;",                               (void*) jni_takeQuery},
+    {"replyQuery",           "(JJZLjava/lang/String;I)I",                            (void*) jni_replyQuery},
 };
 
 // 需要挂上这套 native 方法的类。

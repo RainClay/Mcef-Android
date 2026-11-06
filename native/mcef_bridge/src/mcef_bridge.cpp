@@ -21,7 +21,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -33,6 +35,13 @@ namespace {
 // 单个浏览器的 native 状态。
 // 注意：这里保存的是桥接层状态，不一定等于真实 CefBrowser 指针。
 // 如果后端跑在 Zalith 进程里，这个 id 会映射到远端 CefriumBrowser。
+struct PendingQuery {
+    long long query_id = 0;
+    int persistent = 0;
+    std::string request;
+    std::string origin;
+};
+
 struct BrowserState {
     mcef_browser_t id = 0;
     int width = 0;
@@ -44,6 +53,9 @@ struct BrowserState {
     uint64_t frame_version = 0;
     std::string url;
     std::string dom_json;
+    // 待处理的 JS 查询。Host 推上来、MC 侧取走 —— 只有 Host 持有 Cefrium 的
+    // callback 实例，所以 MC 算完必须回到 Host 才能答复页面。
+    std::deque<PendingQuery> queries;
     // 最新一帧以不可变快照的形式发布：读者在锁内只取一次 shared_ptr（O(1)），
     // 真正的 memcpy 在锁外做。否则几 MB 的帧复制会一直占着 g_mutex，
     // 把 sendInput / loadUrl / Host 回帧一起堵住。
@@ -402,6 +414,59 @@ int mcef_get_url(mcef_browser_t browser, char* out_utf8, size_t out_size, size_t
     return copy_string(b->url, out_utf8, out_size, required_size);
 }
 
+int mcef_take_query(mcef_browser_t browser, mcef_query_t* out_query) {
+    if (!out_query) return MCEF_ERR_INVALID_ARGUMENT;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto* b = find_browser_locked(browser); if (!b) return MCEF_ERR_NOT_FOUND;
+    if (b->queries.empty()) return MCEF_ERR_NOT_FOUND;
+
+    PendingQuery q = std::move(b->queries.front());
+    b->queries.pop_front();
+
+    // 用 malloc 而不是 new：跨 DLL/so 边界的释放必须走同一套分配器，
+    // 配套的 mcef_free_query 用 free。
+    const auto dup = [](const std::string& src) -> char* {
+        char* p = static_cast<char*>(std::malloc(src.size() + 1));
+        if (!p) return nullptr;
+        std::memcpy(p, src.c_str(), src.size() + 1);
+        return p;
+    };
+    out_query->query_id = q.query_id;
+    out_query->persistent = q.persistent;
+    out_query->request = dup(q.request);
+    out_query->origin = dup(q.origin);
+    if (!out_query->request || !out_query->origin) {
+        std::free(out_query->request);
+        std::free(out_query->origin);
+        out_query->request = nullptr;
+        out_query->origin = nullptr;
+        return MCEF_ERR_INTERNAL;
+    }
+    return MCEF_OK;
+}
+
+void mcef_free_query(mcef_query_t* query) {
+    if (!query) return;
+    std::free(query->request);
+    std::free(query->origin);
+    query->request = nullptr;
+    query->origin = nullptr;
+}
+
+int mcef_reply_query(mcef_browser_t browser, long long query_id,
+                     int success, const char* result, int error_code) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!find_browser_locked(browser)) return MCEF_ERR_NOT_FOUND;
+    const std::string body = result ? result : "";
+    ipc_send_if_enabled(
+        "{\"cmd\":\"queryReply\",\"id\":" + std::to_string(browser) +
+        ",\"queryId\":" + std::to_string(query_id) +
+        ",\"success\":" + (success ? "true" : "false") +
+        ",\"errorCode\":" + std::to_string(error_code) +
+        ",\"result\":\"" + json_escape_local(body.c_str()) + "\"}");
+    return MCEF_OK;
+}
+
 int mcef_get_last_error(char* out_utf8, size_t out_size, size_t* required_size) {
     std::lock_guard<std::mutex> lock(g_mutex);
     return copy_string(g_last_error, out_utf8, out_size, required_size);
@@ -440,6 +505,26 @@ int mcef_host_set_dom_json(mcef_browser_t browser, const char* json) {
     std::lock_guard<std::mutex> lock(g_mutex);
     auto* b = find_browser_locked(browser); if (!b) return MCEF_ERR_NOT_FOUND;
     b->dom_json = json ? json : "";
+    return MCEF_OK;
+}
+
+int mcef_host_push_query(mcef_browser_t browser, long long query_id,
+                         const char* request, const char* origin, int persistent) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto* b = find_browser_locked(browser); if (!b) return MCEF_ERR_NOT_FOUND;
+    if (query_id <= 0) return MCEF_ERR_INVALID_ARGUMENT;
+    // 队列上限：MC 侧卡住时不能让 Host 无限堆积内存。超出就丢最旧的，
+    // 页面那边的 cefQuery 本来也有超时。
+    constexpr size_t kMaxPendingQueries = 64;
+    if (b->queries.size() >= kMaxPendingQueries) {
+        b->queries.pop_front();
+    }
+    PendingQuery q;
+    q.query_id = query_id;
+    q.persistent = persistent ? 1 : 0;
+    q.request = request ? request : "";
+    q.origin = origin ? origin : "";
+    b->queries.push_back(std::move(q));
     return MCEF_OK;
 }
 

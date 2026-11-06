@@ -135,6 +135,16 @@ void handle_line(const std::string& line) {
         mcef_host_set_url(id, url.c_str());
         return;
     }
+    if (event == "query") {
+        // Host 收到页面的 cefQuery 后推到这里，等 MC 侧取走处理。
+        // 只有 Host 持有 Cefrium 的 callback 实例，所以结果还得回 Host 才能答复页面。
+        const long long query_id = extract_json_int(line, "queryId", 0);
+        const int persistent = static_cast<int>(extract_json_int(line, "persistent", 0));
+        const std::string request = extract_json_string(line, "request");
+        const std::string origin = extract_json_string(line, "origin");
+        mcef_host_push_query(id, query_id, request.c_str(), origin.c_str(), persistent);
+        return;
+    }
     if (event == "created") {
         return; // 目前无需处理，保留语义。
     }

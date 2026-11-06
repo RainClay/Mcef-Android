@@ -134,6 +134,33 @@ MCEF_API int mcef_request_dom_snapshot(mcef_browser_t browser);
 MCEF_API int mcef_request_elements_at_point(mcef_browser_t browser, int x, int y);
 MCEF_API int mcef_click_dom(mcef_browser_t browser, const char* selector);
 
+// JS 查询（window.cefQuery）的请求。
+//
+// 页面调 cefQuery 后，Host 把 request 连同 SDK 分配的 queryId 一起交给 native。
+// MC 侧用 mcef_take_query 取出、交给 CefQueryCallbackHandler 处理，
+// 再用 mcef_reply_query 把结果发回 Host，由 Host 调 Cefrium 的 callback。
+//
+// 为什么必须绕这一圈：只有 Host 进程持有 Cefrium 的 callback 实例，
+// MC 侧算完结果没法直接回页面。
+typedef struct mcef_query_t {
+    long long query_id;   // Cefrium 分配的 id，回填时必须原样带回
+    int persistent;       // 页面传的 persistent 标志
+    char* request;        // UTF-8，调用方释放（见 mcef_free_string）
+    char* origin;         // 发起页面的 origin
+} mcef_query_t;
+
+// 取最早一条待处理查询。返回 MCEF_OK 时 out_query 被填充，调用方负责释放
+// 其中的 request / origin。没有待处理查询返回 MCEF_ERR_NOT_FOUND。
+MCEF_API int mcef_take_query(mcef_browser_t browser, mcef_query_t* out_query);
+
+// 释放 mcef_query_t 里由 native 分配的字符串。
+MCEF_API void mcef_free_query(mcef_query_t* query);
+
+// 回填查询结果。success=true 走 callback.success(result)，
+// success=false 走 callback.failure(error_code, result)。
+MCEF_API int mcef_reply_query(mcef_browser_t browser, long long query_id,
+                              int success, const char* result, int error_code);
+
 // 读取当前缓存的帧、DOM 和 URL。MC 渲染线程主要使用 mcef_copy_frame。
 MCEF_API int mcef_get_frame_info(mcef_browser_t browser, mcef_frame_info_t* out_info);
 MCEF_API int mcef_copy_frame(mcef_browser_t browser, void* out_bgra, size_t out_size, mcef_frame_info_t* out_info);
@@ -151,6 +178,8 @@ MCEF_API int mcef_get_last_error(char* out_utf8, size_t out_size, size_t* requir
 // 这样即使 libmcef.so 暂时不直接链接 libcef.so，也能作为稳定桥接层工作。
 MCEF_API int mcef_host_set_frame(mcef_browser_t browser, const void* bgra, int width, int height, int stride);
 MCEF_API int mcef_host_set_dom_json(mcef_browser_t browser, const char* json);
+MCEF_API int mcef_host_push_query(mcef_browser_t browser, long long query_id,
+                                  const char* request, const char* origin, int persistent);
 MCEF_API int mcef_host_set_url(mcef_browser_t browser, const char* url);
 
 #ifdef __cplusplus
