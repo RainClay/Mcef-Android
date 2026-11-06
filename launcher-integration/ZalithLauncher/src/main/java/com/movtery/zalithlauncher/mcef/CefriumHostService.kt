@@ -3,12 +3,6 @@
  *
  * 作用：运行在 Zalith Android 进程内，提供 Android Context / Looper / Manifest
  * 环境，承接 libmcef.so 从 Minecraft 侧发来的 IPC 命令，并驱动 CefriumBrowser。
- *
- * Modified by Rain_Clay, 2026-11: MCEF/Cefrium 内置浏览器宿主集成
- *   （Cefrium 原生库预加载、IPC host、按需下载与设置项）。
- *
- * 本文件位于 Zalith Launcher 源码树内，按 GPL-3.0-or-later 发布；
- * 修改部分同样按 GPL-3.0-or-later 发布。
  */
 package com.movtery.zalithlauncher.mcef
 
@@ -44,38 +38,14 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
 /**
- * Cefrium Host：启动器进程里的浏览器宿主。
+ * 第一版 Cefrium Host：
  *
- * <p>MC 侧（纯 OpenJDK，加载不到 android.*）通过 libmcef.so 发 JSON 行协议过来，
- * 本类在 Android 进程里真正驱动 CefriumBrowser。两端的分工：</p>
- *
- * <pre>
- * MC JVM ──JNI──▶ libmcef.so ──TCP 127.0.0.1:39090──▶ 本类 ──▶ CefriumBrowser
- * </pre>
- *
- * <h3>命令</h3>
- * <p>create / destroy / resize / loadUrl / eval / domSnapshot / elementsAtPoint /
- * input / reload / goBack / goForward / stopLoading，分派见 {@code when (cmd)}。</p>
- *
- * <h3>回传</h3>
- * <p>三类事件，都带 {@code id}：</p>
- * <ul>
- *   <li>{@code {"event":"frame"}} —— <b>二进制帧</b>：一行 JSON header
- *       （size/w/h/stride）+ 紧随其后的裸像素。header 的 {@code size} 必须严格等于
- *       {@code stride*h}，多一个字节 native 就拒收整帧。</li>
- *   <li>{@code {"event":"dom"}} —— DOM JSON 文本。</li>
- *   <li>{@code {"event":"url"}} —— 导航后的真实地址。</li>
- * </ul>
- *
- * <h3>能力边界</h3>
- * <ul>
- *   <li><b>resize 无效</b>：CefriumBrowser 没有 resize API，真实尺寸在 create 时固定。
- *       见 {@code handleResize}。</li>
- *   <li><b>键盘不支持</b>：CefriumBrowser 无键盘 API。鼠标 move/down/up/wheel 是通的，
- *       键盘事件走 {@code else} 分支记录后丢弃。</li>
- *   <li><b>查询是单向的</b>：{@code setQueryHandler} 把 request 当 DOM 快照回传，
- *       没有「Java 主动向页面查询」的通道。</li>
- * </ul>
+ * - 监听 127.0.0.1:39090；
+ * - 接收 libmcef.so 的 JSON 行协议；
+ * - 创建 OSR CefriumBrowser；
+ * - 执行 loadUrl/eval/elementsAtPoint/domSnapshot；
+ * - 通过 cefriumQuery 把 DOM JSON 回给 libmcef.so；
+ * - OnPaint 帧暂时只记录日志，后续升级为二进制 frame IPC 或共享内存。
  */
 class CefriumHostService : Service() {
     private val running = AtomicBoolean(false)
@@ -720,6 +690,7 @@ class CefriumHostService : Service() {
             "goBack" -> handleBrowserAction(json, "goBack") { it.goBack() }
             "goForward" -> handleBrowserAction(json, "goForward") { it.goForward() }
             "stopLoading" -> handleBrowserAction(json, "stopLoading") { it.stopLoading() }
+            "queryReply" -> handleQueryReply(json)
             else -> Log.w(TAG, "未知命令: $cmd line=$line")
         }
     }
@@ -790,12 +761,19 @@ class CefriumHostService : Service() {
                 // 直接放开为 anyOrigin()。网页 mod 的目标场景本来就是要加载任意
                 // 远端页面并允许它们调用桥，最终形态也是全开放，这里就一步到位。
                 // 认证仍由 LB 自己的 lb_code 中间件负责，不依赖这个策略。
+                // 页面 cefQuery 的入口。
+                //
+                // 之前这里把 request 当 DOM 快照 sendDom 出去、再 callback.success("ok")，
+                // 页面拿到的永远是字符串 "ok" —— WebDisplays 解析失败，请求直接作废。
+                //
+                // 现在改成：存下 callback，把 request 推给 MC 侧处理器，
+                // 等它算完用 queryReply 回来再答复（见 handleQueryReply）。
                 browser.setQueryHandler(
                     CefriumBrowser.QueryOriginPolicy.anyOrigin()
-                ) { _, request, origin, callback ->
-                    fileLog("cefriumQuery id=$id origin=$origin bytes=${request.length}")
-                    sendDom(id, request)
-                    callback.success("ok")
+                ) { queryId, request, origin, callback ->
+                    fileLog("cefriumQuery id=$id queryId=$queryId origin=$origin bytes=${request.length}")
+                    entry.pendingQueries[queryId] = callback
+                    sendQuery(id, queryId, request, origin)
                     true
                 }
 
@@ -972,6 +950,41 @@ class CefriumHostService : Service() {
         val height = json.optInt("height", 0)
         browsers[id] ?: return
         fileLog("resize id=$id ${width}x$height ignored (CefriumBrowser 无 resize API)")
+    }
+
+    /**
+     * MC 侧算完查询结果，回来答复页面。
+     *
+     * 链路：页面 cefQuery → [setQueryHandler] 把 request 推给 MC
+     * → MC 的 CefQueryCallbackHandler 处理 → IPC {"cmd":"queryReply"} 到这里
+     * → 取出当初存的 [CefriumBrowser.QueryCallback] 调 success/failure。
+     *
+     * 只有本进程持有这个 callback，所以绕不开这一跳。
+     */
+    private fun handleQueryReply(json: JSONObject) {
+        val id = json.optLong("id", 0L)
+        val queryId = json.optLong("queryId", 0L)
+        val success = json.optBoolean("success", false)
+        val errorCode = json.optInt("errorCode", 0)
+        val result = json.optString("result", "")
+
+        val entry = browsers[id]
+        if (entry == null) {
+            fileLog("queryReply id=$id queryId=$queryId ignored (browser gone)")
+            return
+        }
+        val callback = entry.pendingQueries.remove(queryId)
+        if (callback == null) {
+            // 超时被清掉、或页面已经走了。不是错误，记一笔就够。
+            fileLog("queryReply id=$id queryId=$queryId ignored (no pending callback)")
+            return
+        }
+        runCatching {
+            if (success) callback.success(result)
+            else callback.failure(errorCode, result)
+        }.onFailure {
+            fileLog("queryReply id=$id queryId=$queryId failed", it)
+        }
     }
 
     private fun handleLoadUrl(json: JSONObject) {
@@ -1168,6 +1181,24 @@ class CefriumHostService : Service() {
         }
     }
 
+    /**
+     * 把页面的 cefQuery 请求推给 MC 侧。
+     *
+     * 只推请求本身，结果要等 MC 侧算完从 queryReply 回来 —— Cefrium 的 callback
+     * 留在这边（pendingQueries），只有本进程能答复页面。
+     */
+    private fun sendQuery(id: Long, queryId: Long, request: String, origin: String) {
+        fileLog("sending query id=$id queryId=$queryId bytes=${request.length}")
+        sendEvent(clientWriter ?: return, JSONObject().apply {
+            put("event", "query")
+            put("id", id)
+            put("queryId", queryId)
+            put("request", request)
+            put("origin", origin)
+            put("persistent", 0)
+        })
+    }
+
     private fun sendDom(id: Long, domJson: String) {
         fileLog("sending DOM id=$id bytes=${domJson.length}")
         sendEvent(clientWriter ?: return, JSONObject().apply {
@@ -1310,7 +1341,11 @@ class CefriumHostService : Service() {
         // setter 一次 + ThemeManager.updateImmediate 改 url 一次）。连续重导航会让 CEF OSR
         // 在首帧绘制中途被打断，是"点一下界面就白/卡住"的高概率诱因。
         @Volatile var lastDispatchedUrl: String? = null,
-        @Volatile var lastLoadAtMs: Long = 0L
+        @Volatile var lastLoadAtMs: Long = 0L,
+        // 已推给 MC 侧、还没答复的查询。Cefrium 的 callback 只在这里有效 ——
+        // MC 算完结果得回来调它，页面才收得到 onSuccess/onFailure。
+        val pendingQueries: MutableMap<Long, CefriumBrowser.QueryCallback> =
+            java.util.concurrent.ConcurrentHashMap()
     )
 
     companion object {
