@@ -57,7 +57,7 @@ public class CefSettings {
     /** 是否从命令行开关读取配置。 */
     public boolean command_line_args_disabled = false;
 
-    /** 远程调试端口，<=0 表示关闭。 */
+    /** 远程调试端口，&lt;=0 表示关闭。 */
     public int remote_debugging_port = 0;
 
     /** 未捕获异常栈大小。 */

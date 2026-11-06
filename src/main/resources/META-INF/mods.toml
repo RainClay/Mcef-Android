@@ -9,7 +9,7 @@ license="GPL-3.0-or-later"
 
 [[mods]]
 modId="mcef"
-version="2.2.0-1.20.1-android"
+version="2.2.1-1.20.1-android"
 displayName="MCEF (Android / Cefrium)"
 displayURL="https://github.com/RainClay/Mcef-Android"
 authors="Android port"

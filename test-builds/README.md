@@ -20,6 +20,12 @@
 - **so 加载**：先 `System.loadLibrary("mcef")`（走 APK 的 lib 目录）；失败则从 jar 的
   `natives/arm64-v8a/` 解压到 `java.io.tmpdir` 再 `System.load`。
 
+### 已知限制
+
+见仓库根 README 的「已知限制」表。要点：`resize` 无效（Cefrium 无此 API）、
+键盘输入不支持（host 侧无键盘 API）、`getTitle()` 恒空串、
+`CefQueryCallbackHandler` 不会被调用。鼠标 move/down/up/wheel 是通的。
+
 ### 安装
 
 ```bash

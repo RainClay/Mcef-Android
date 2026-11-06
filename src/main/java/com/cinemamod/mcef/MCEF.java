@@ -49,6 +49,17 @@ import java.util.List;
  *
  * <p><b>关键：本类零 android 依赖。</b> MC 跑在纯 OpenJDK JVM 里，
  * 任何 {@code android.*} 引用都是运行期 {@code NoClassDefFoundError}。</p>
+ *
+ * <p><b>没有全局浏览器注册表</b>：早先版本有 {@code ACTIVE} 列表和
+ * {@code tickAll()}，现已删除 —— 帧上传由
+ * {@link MCEFRenderer#getTextureID()} 按 MC 帧号驱动，不需要集中轮询。
+ * 每帧的 {@code ++} 由 {@code MCEFMod} 在 {@code RenderTickEvent.START} 完成。</p>
+ *
+ * <h3>初始化时机</h3>
+ * <p>{@code McefNative.init} 是<b>同步</b>的（返回即代表结果），所以
+ * {@link #scheduleForInit} 在桥已就绪时会当场回调，否则登记到
+ * {@code PENDING_INIT}，等 {@link #initialize} 成功时统一触发。
+ * {@link MCEFBrowser} 的构造函数也会兜底调 {@link #ensureInitialized()}。</p>
  */
 public final class MCEF {
 
@@ -172,15 +183,25 @@ public final class MCEF {
     /**
      * 创建浏览器并指定初始渲染尺寸。
      *
-     * <p>比无尺寸版本更适合 WebDisplays：它按屏幕方块的像素尺寸建浏览器，
-     * 尺寸对了首帧就不用等 resize（而 native 侧 resize 目前是空操作）。</p>
+     * <p>尺寸要在<b>这里</b>给定：native 侧 {@code resize} 返回
+     * {@code ERR_UNSUPPORTED}（Cefrium SDK 没有 resize API，CEF 浏览器尺寸在
+     * create 时固定），之后再改是无效的。</p>
+     *
+     * <p>注意 WebDisplays 并不走本方法 —— 它是
+     * {@code new WDClientBrowser(...) → super(...)} 直接进
+     * {@link MCEFBrowser} 的构造函数，用的是 1280×720 默认值。</p>
      */
     public static MCEFBrowser createBrowser(String url, boolean transparent, int width, int height) {
         ensureInitialized();
         return new MCEFBrowser(getClient(), url, transparent, width, height, true);
     }
 
-    /** 当前 CefSettings（只读用途；改它对 Android 侧不生效，见类注释）。 */
+    /**
+     * 当前 {@link CefSettings}。
+     *
+     * <p><b>改了不生效</b>：真正的 CEF 在启动器进程里，它的设置在那边初始化时
+     * 就已固定，MC 侧拿到的只是本地的一个空壳对象。改这里的字段不会有任何效果。</p>
+     */
     public static CefSettings getSettings() {
         return CefApp.getInstance().getSettings();
     }
@@ -241,7 +262,13 @@ public final class MCEF {
         }
     }
 
-    /** 释放引用。不停止启动器侧的 CEF —— 那会影响同启动器里的其它实例。 */
+    /**
+     * 释放引用。
+     *
+     * <p><b>不停止启动器侧的 CEF</b> —— 那个进程可能还被同启动器里的其它实例用着。
+     * 这里只关掉 MC 侧的 JNI 客户端并清空 {@link #client}，桥标记回未初始化状态，
+     * 之后可以再 {@link #initialize} 一次。</p>
+     */
     public static synchronized void shutdown() {
         try {
             McefNative.shutdown();

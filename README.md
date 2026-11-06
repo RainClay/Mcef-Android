@@ -5,7 +5,7 @@
 做法：按 JCEF 的公开 API 重写 `org.cef.*` / `com.cinemamod.mcef.*` 两层，
 底层不接 JCEF 的 libcef，而是接启动器里已经在跑的 **Cefrium**（通过 `libmcef.so` 的 IPC）。
 
-- 版本：`2.2.0-1.20.1-android`
+- 版本：`2.2.1-1.20.1-android`
 - 许可证：[GPL-3.0-or-later](LICENSE)
 - 目标：Forge 1.20.1（`47.4.0`），Java 17 字节码
 - modId：`mcef`（与上游同名，见下方「与上游的关系」）
@@ -169,7 +169,7 @@ String url = browser.getURL();
 ## 构建
 
 ```bash
-./gradlew build          # → build/libs/mcef-forge-2.2.0-1.20.1-android.jar
+./gradlew build          # → build/libs/mcef-forge-2.2.1-1.20.1-android.jar
 ```
 
 运行 Gradle 的 JVM 需要 **JDK 17 或更高**；输出固定为 Java 17 字节码（MC 1.20.1 的 class 是 v61）。
@@ -256,15 +256,33 @@ const char* const kTargetClasses[] = {
 
 | 功能 | 状态 | 原因 |
 |---|---|---|
-| **`resize`** | ❌ 空操作 | Cefrium SDK 没有 resize API，CEF 浏览器尺寸在 create 时固定；native 侧返回 `MCEF_ERR_UNSUPPORTED` |
-| **键盘输入** | ❌ 不支持 | `CefriumBrowser` 没有键盘 API。鼠标（move/down/up/wheel）是通的 |
-| **标题回调** | ❌ `getTitle()` 返回空串 | IPC 桥没有取标题的通道 |
-| **`sendQuery`（native→页面）** | ❌ 记日志后忽略 | 只有页面发起的方向可用 |
+| **`resize`** | ❌ 无效 | Cefrium SDK 没有 resize API，CEF 浏览器尺寸在 create 时固定；native 侧 `mcef_resize` 返回 `MCEF_ERR_UNSUPPORTED`。要别的尺寸只能在构造时给 |
+| **键盘输入** | ❌ 不支持 | `CefriumBrowser` 没有键盘 API。`sendKey*` 会发出去，host 侧记录「后端不支持」后丢弃。鼠标（move/down/up/wheel）是通的 |
+| **标题回调** | ❌ `getTitle()` 恒空串 | IPC 桥没有取标题的通道 |
+| **`sendQuery`** | ❌ 只记日志 | 只有「页面 → Java」方向能被 host 接住 |
+| **`CefQueryCallbackHandler`** | ❌ 不会被调用 | `CefClient` 里存了处理器，但从没有分发逻辑。实际数据走 `cefriumQuery → sendDom → dom_json`，而 `McefNative.getDomJson` 无调用方 |
+| **光标监听** | ❌ 不会触发 | native 与 host 两侧都没有 cursor 命令，Cefrium 也没暴露回调 |
 | **资源拦截** | ⚠️ 只能放行/拦截 | 桥只给 URL，不能改写响应体 |
 | **子 frame** | ⚠️ 只支持主 frame | OSR 未区分 frame |
 | **页面视频** | ⚠️ 有声音无画面 | media router 打桩，未验证 |
 
 鼠标输入的坐标是 **OSR 画布像素**，需要上层按屏幕方块尺寸换算。
+
+### 查询链路为什么是断的
+
+这是目前最值得补的一处。页面调 `window.cefriumQuery(request)` 后：
+
+```
+页面 window.cefriumQuery(request)
+  └── host: CefriumBrowser.setQueryHandler(anyOrigin)   ← 有注册
+        └── sendDom(id, request) → IPC {"event":"dom"}   ← 有回传
+              └── native: mcef_host_set_dom_json         ← 有存储
+                    └── McefNative.getDomJson(handle)    ← 无调用方 ✗
+```
+
+同时 `CefClient.queryHandlers` 里注册的 `CefQueryCallbackHandler` 从来没有被遍历。
+两端都通、中间没人接。补法：在 `MCEFBrowser` 收到 dom 事件时遍历
+`client.getHandle().getQueryHandlers()` 并分发。
 
 ---
 
@@ -391,6 +409,6 @@ MC 可能还在切 FBO、用别的 texture unit。
 
 - [libmcef 源码](https://github.com/RainClay/Mcef-Android/tree/libmcef-source) —— `libmcef.so` 的 C++/JNI 实现
 - [启动器集成源码](https://github.com/RainClay/Mcef-Android/tree/launcher-integration) —— Cefrium Host 侧
-- [测试包](https://github.com/RainClay/Mcef-Android/tree/1.20.1/test-builds/2.2.0) —— 已编译好的 jar 与 so
+- [测试包](https://github.com/RainClay/Mcef-Android/tree/1.20.1/test-builds) —— 已编译好的 jar 与 so（2.2.0 为最新发布产物）
 - [WebDisplays](https://github.com/CinemaMod/webdisplays)（MIT）—— 消费方，API 面按它的字节码引用裁剪
 - [CinemaMod MCEF](https://github.com/CinemaMod/mcef)（LGPL-2.1）—— 同类项目的桌面实现，本项目未复用其代码

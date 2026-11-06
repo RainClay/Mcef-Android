@@ -57,6 +57,21 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *                                          └── 启动器 .cefhost 进程
  *                                                （ART + Cefrium + libcef）
  * </pre>
+ *
+ * <h3>生命周期</h3>
+ * <p>构造函数里就 {@code MCEF.ensureInitialized()} 再 {@code createBrowser}，
+ * 失败时 {@code handle <= 0} 并记一条 error。渲染完全靠 {@link #getRenderer()}
+ * 取纹理，本类不注册任何渲染事件 —— 帧上传的驱动点是
+ * {@link MCEFRenderer#getTextureID()}，详见 {@link #tick()}。</p>
+ *
+ * <h3>已知空缺</h3>
+ * <ul>
+ *   <li>{@link #resize}：native 返回 {@code ERR_UNSUPPORTED}（Cefrium 无此 API）</li>
+ *   <li>{@link #getTitle}：恒空串（IPC 无取标题通道）</li>
+ *   <li>{@link #sendQuery}：只支持「页面 → Java」方向</li>
+ *   <li>键盘输入：会发出去，host 侧明确不支持</li>
+ *   <li>光标：{@link MCEFCursorChangeListener} 不会被触发</li>
+ * </ul>
  */
 public class MCEFBrowser extends CefBrowserOsr {
 
@@ -107,7 +122,7 @@ public class MCEFBrowser extends CefBrowserOsr {
         this(client, url, transparent, DEFAULT_WIDTH, DEFAULT_HEIGHT, autoDSF);
     }
 
-    /** 扩展构造：指定初始渲染尺寸（WebDisplays 用不到，但保留便于上层控制）。 */
+    /** 扩展构造：指定初始渲染尺寸（WebDisplays 走的是 3 参数版本，这个是给上层自用的）。 */
     public MCEFBrowser(MCEFClient client, String url, boolean transparent,
                        int width, int height, boolean autoDSF) {
         super(transparent);
@@ -117,8 +132,9 @@ public class MCEFBrowser extends CefBrowserOsr {
         this.viewWidth = Math.max(1, width);
         this.viewHeight = Math.max(1, height);
 
-        // 可选的尺寸上限；默认不限制，并按比例缩放，绝不把宽高分别 clamp 成正方形。
-        // 例如 1280x720 限制最长边 512 后变成 512x288，保持 16:9。
+        // 可选的尺寸上限，默认不限（-Dmcef.maxDim=0）。
+        // 设了就按最长边等比缩放，绝不把宽高分别 clamp —— 那样 1280x720
+        // 会变成 512x512，网页被压成正方形。
         final int maxDim = Integer.getInteger("mcef.maxDim", 0);
         if (maxDim > 0) {
             final int longest = Math.max(this.viewWidth, this.viewHeight);
@@ -267,6 +283,26 @@ public class MCEFBrowser extends CefBrowserOsr {
     /**
      * 拉取并上传最新帧。由 renderer 的 frame-gated beforeUse 回调调用，
      * 同一浏览器同一 MC 渲染帧最多进入一次。
+     *
+     * <h3>调用链与三道闸</h3>
+     * <pre>
+     * MCEFRenderer.getTextureID()
+     *   └── claimPumpForFrame(minecraftFrameId)     // 同帧只放行一次
+     *         └── tick()                            // ← 本方法
+     *               ├── peekTextureID()              // 不触发 pump，防递归
+     *               ├── getFrameInfo()               // version 没变直接返回
+     *               ├── copyFrame()                  // 复用直接缓冲
+     *               └── MCEFRenderer.onPaint()       // swap + glTexImage2D
+     * </pre>
+     *
+     * <ul>
+     *   <li>本方法内<b>只能用 {@code peekTextureID()}</b>。调 {@code getTextureID()}
+     *       就是 {@code getTextureID → beforeUse → tick → getTextureID} 自递归
+     *       （实测 -Xss2040k 下 6.2 万层，-Xss512k 下 7331 层）。</li>
+     *   <li>{@code pumping} 是第二道防线：即便上面两道闸都漏了，也不会重入。</li>
+     *   <li>版本号守门：{@code version <= 0}（native 初始化的全透明占位帧）
+     *       或 {@code == lastVersion} 时直接返回，不 copy、不 swap、不上传。</li>
+     * </ul>
      */
     public void tick() {
         if (handle <= 0 || !pumping.compareAndSet(false, true)) return;
@@ -350,8 +386,10 @@ public class MCEFBrowser extends CefBrowserOsr {
         viewWidth = Math.max(1, width);
         viewHeight = Math.max(1, height);
         if (handle > 0) {
-            // native 侧当前是空操作（Cefrium 无 resize API）；
-            // 这里只让 getBounds() 反映最新值。
+            // native 侧返回 MCEF_ERR_UNSUPPORTED：Cefrium SDK 没有 resize API，
+            // CEF 浏览器的实际尺寸在 create 时就固定了。这里调用只是为了
+            // 让 getBounds() 反映最新值，帧本身不会被重新排版。
+            // 需要别的尺寸就在构造时指定（见 createBrowser 的 4 参数版本）。
             McefNative.resize(handle, viewWidth, viewHeight);
         }
     }
@@ -403,9 +441,16 @@ public class MCEFBrowser extends CefBrowserOsr {
 
     @Override
     public void setFocus(boolean enable) {
-        // 输入事件本身隐含聚焦
+        // IPC 桥没有 focus 命令（native 与 host 两侧都没有对应 cmd）。
+        // 焦点由输入事件隐含：点到页面里就相当于聚焦。
     }
 
+    /**
+     * 当前 URL。优先问 native，拿不到就退回最后一次 loadURL 的目标。
+     *
+     * <p>native 侧返回的是 host 上报的真实地址（跟随重定向后的），
+     * {@code pendingUrl} 是请求地址。两者都可能为空串。</p>
+     */
     @Override
     public String getURL() {
         if (handle > 0) {
@@ -419,11 +464,23 @@ public class MCEFBrowser extends CefBrowserOsr {
         return pendingUrl == null ? "" : pendingUrl;
     }
 
+    /**
+     * 页面标题。
+     *
+     * <p><b>恒为空串</b>：IPC 桥没有取标题的通道。要支持得在 host 侧加
+     * {@code onTitleChange} 上报 + native 侧加缓存与查询命令。</p>
+     */
     @Override
     public String getTitle() {
         return "";
     }
 
+    /**
+     * 向页面发起查询。
+     *
+     * <p><b>空实现</b>：只有「页面 → Java」这个方向可用（{@code window.cefQuery}
+     * 经 host 转发）。反方向没有对应 IPC 命令，所以这里只记日志。</p>
+     */
     @Override
     public void sendQuery(String query, int queryId) {
         LOGGER.debug("sendQuery ignored: page-initiated only");
@@ -442,6 +499,14 @@ public class MCEFBrowser extends CefBrowserOsr {
     }
 
     // ── 输入：上游 MCEF 的签名（WebDisplays 直接调这些）────────────────────
+    //
+    // 坐标是 OSR 画布像素（0..viewWidth / 0..viewHeight），不是方块尺寸也不是
+    // 屏幕坐标 —— 上层要自己按方块面尺寸换算。
+    //
+    // 能力边界：鼠标 move/down/up/wheel 四个类型 host 侧有真实实现
+    // （CefriumBrowser 的 sendMouse* API）。键盘的 down/up/char 会发出去，
+    // 但 host 侧明确记录「后端不支持（CefriumBrowser 无键盘 API）」并丢弃。
+    // 保留这些方法是为了让消费方代码通过链接。
 
     public void sendMouseMove(int mouseX, int mouseY) {
         sendInput(McefNative.INPUT_MOUSE_MOVE, mouseX, mouseY, 0, 0, 0, 0, 0, 0, 0);
@@ -514,6 +579,7 @@ public class MCEFBrowser extends CefBrowserOsr {
         if (handle <= 0) return;
         final int rc = McefNative.sendInput(handle, type, x, y, button, keyCode, scanCode,
                 modifiers, deltaX, deltaY, codepoint);
+        // ERR_UNSUPPORTED 是预期内的（例如键盘），不当错误刷屏。
         if (rc != McefNative.OK && rc != McefNative.ERR_UNSUPPORTED) {
             LOGGER.debug("sendInput type={} rc={}", type, rc);
         }

@@ -164,7 +164,7 @@ public final class McefNative {
 
     /** jar 内 so 的版本标记，改 so 时同步改这里，避免复用旧的解压文件。 */
     private static final class BuildStamp {
-        static final String VALUE = "2.2.0";
+        static final String VALUE = "2.2.1";
     }
 
     /** so 是从哪里加载的（"java.library.path" 或临时文件路径）。 */

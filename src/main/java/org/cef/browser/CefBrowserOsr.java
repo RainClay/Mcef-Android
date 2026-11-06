@@ -35,18 +35,20 @@ import java.util.HashMap;
  * <pre>
  * WebDisplays  ──依赖──▶  com.cinemamod.mcef.MCEFBrowser
  *                              └──extends──▶  CefBrowserOsr（本类）
- *                                                  └── JNI ──▶ CefriumBrowser
+ *                                                  └── 抽象方法 ──▶ 子类实现
+ *                                                        └── JNI ──▶ libmcef.so
+ *                                                              └── IPC ──▶ 启动器 Cefrium
  * </pre>
  *
- * <p>JCEF 原本的实现会调用 libcef 的 C++ 接口；Android 上换成 Cefrium 的 JNI。
- * 本类负责保存<b>渲染回调</b>（{@link #onPaint}、{@link #onPopupShow}、
- * {@link #onPopupSize}）所需的公共状态，以及把输入事件、JS 执行、尺寸变更
- * 交给子类实现。</p>
+ * <p>注意<b>本类不直接碰 Cefrium</b>：MC 是纯 OpenJDK，加载不到任何 {@code android.*}。
+ * 它只定义子类必须实现的抽象方法，以及保存渲染回调（{@link #onPaint}、
+ * {@link #onPopupShow}、{@link #onPopupSize}）的签名，让 WebDisplays 那类
+ * 消费方有稳定的覆写入口。</p>
  *
- * <p>设计取舍：这里<b>不</b>按 JCEF 那样把 onPaint 做成内部回调链，因为 Cefrium 的
- * 帧分发方式是 {@code CefriumBrowser.setRenderHandler(handler)} —— 一个浏览器一个
- * 回调。子类（MCEFBrowser）在构造时注册该回调，回调里再调用本类的
- * {@link #onPaint}，从而保持与 JCEF 相同的供 WebDisplays 覆写的入口。</p>
+ * <p><b>帧不是回调推过来的，是子类轮询拉过来的。</b> IPC 桥没有「帧到达」事件：
+ * 子类在纹理被取用时调 {@code getFrameInfo} 查版本号、变了才 {@code copyFrame}，
+ * 然后主动调 {@link #onPaint}。所以不要指望本类的 {@code onPaint} 会被外部触发 ——
+ * 它是给覆写者用的钩子，唯一的调用方是 {@code MCEFBrowser.tick()}。</p>
  */
 public abstract class CefBrowserOsr implements CefBrowser {
 

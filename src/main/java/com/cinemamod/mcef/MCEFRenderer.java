@@ -44,16 +44,35 @@ import static org.lwjgl.opengl.GL12.GL_CLAMP_TO_EDGE;
  * Android 驱动组合上实测可显示且颜色正确的路径。格式和驱动行为如有变化，须在
  * MobileGlues 与 gl4es 上分别实测，不可只凭 GLES 规范推断。</p>
  *
- * <h3>为什么走 RenderSystem 而不是裸 GL</h3>
- * <p>MC 1.20.1 的 {@code RenderSystem} 提供 {@code bindTexture} / {@code texParameter}
- * 等封装，它们会同时维护 MC 自己的 GL 状态缓存。绕过它直接用 {@code glBindTexture}
- * 会让缓存与实际状态不一致，MC 后续绘制就可能绑错纹理。
- * （Android 版 mcef-android 里因为不能依赖 blaze3d 才用了裸 GL，这里可以正常用。）</p>
+ * <h3>哪里走 RenderSystem，哪里走裸 GL</h3>
+ * <p>分界线是「绑定/参数」走 MC 封装，「分配/上传」走裸 GL：</p>
+ * <table border="1">
+ *   <caption>调用面</caption>
+ *   <tr><th>操作</th><th>用什么</th><th>为什么</th></tr>
+ *   <tr><td>绑定纹理</td><td>{@code GlStateManager._bindTexture}</td>
+ *       <td>同步 MC 的 GL 状态缓存与 active texture unit</td></tr>
+ *   <tr><td>过滤/环绕参数</td><td>{@code RenderSystem.texParameter}</td>
+ *       <td>同上，且会走 MC 的纹理参数缓存</td></tr>
+ *   <tr><td>{@code glGenTextures} / {@code glTexImage2D} / {@code glDeleteTextures}</td>
+ *       <td>裸 GL（{@code GL11} 静态导入）</td>
+ *       <td>MC 没有对应封装；上传本身不改 MC 关心的状态</td></tr>
+ * </table>
+ *
+ * <p>裸 {@code glBindTexture} 之所以不能用，是因为它会绕开 MC 的缓存，
+ * 让缓存与实际状态不一致，MC 后续绘制就可能绑错纹理。</p>
  *
  * <h3>GL 状态卫生</h3>
  * <p>不碰 {@code GL_UNPACK_ROW_LENGTH}：CEF 的 buffer 是紧凑的，GL 默认值
  * （0 = 按纹理宽度）本来就对。设了不还原会污染 MC 所有 GUI 贴图的上传，
  * 表现是整个界面贴图错位、撕裂。</p>
+ *
+ * <p>上传前后都绑定回 0，不把绑定位留给 MC 后续绘制。</p>
+ *
+ * <h3>驱动实测</h3>
+ * <p>上面的格式组合在 <b>MobileGlues</b> 上验证可用。切到 <b>gl4es</b>
+ * （{@code libng_gl4es.so}）会崩在 {@code __memcpy_aarch64_simd}：它处理
+ * 1280×720 这种 NPOT 大纹理上传时内部临时缓冲越界。gl4es 这条路上无解，
+ * 不是本类能绕过的。</p>
  */
 public class MCEFRenderer {
 
@@ -88,9 +107,9 @@ public class MCEFRenderer {
             return;
         }
 
-        // bindTextureForSetup 是 MC 为「纹理设置」提供的绑定入口，
-        // 它会正确处理 active texture unit 与 gl4es 的状态同步；
-        // 用普通 bindTexture 时 gl4es 内部状态可能没更新，导致后续上传越界。
+        // 绑定走 GlStateManager._bindTexture 而非裸 glBindTexture：
+        // 它会正确处理 active texture unit 并同步 MC 的 GL 状态缓存。
+        // 用裸绑定时缓存没更新，后续 texParameter 可能作用到别的纹理上。
         com.mojang.blaze3d.platform.GlStateManager._bindTexture(textureId[0]);
         RenderSystem.texParameter(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         RenderSystem.texParameter(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -104,7 +123,10 @@ public class MCEFRenderer {
     /**
      * 上传一帧。必须在渲染线程调用。
      *
-     * @param buffer BGRA 像素，尺寸 width*height*4
+     * <p><b>会就地修改 buffer</b>：先做 R/B 交换，再交给 GL。调用方拿到的
+     * buffer 已经是 RGBA，不要再按 BGRA 解释。</p>
+     *
+     * @param buffer BGRA 像素，容量至少 width*height*4
      */
     public void onPaint(ByteBuffer buffer, int width, int height) {
         if (buffer == null || width <= 0 || height <= 0) return;
@@ -124,9 +146,11 @@ public class MCEFRenderer {
 
         com.mojang.blaze3d.platform.GlStateManager._bindTexture(textureId[0]);
 
-        // CEF buffer 为 BGRA；先交换 R/B，再通过已验证的 GL_BGRA / REV 路径上传。
-        // 该适配针对当前驱动实测：不交换时画面红蓝通道反转；交换后通道正确。
-        // 不要把这段注释简化成“驱动忽略 GL_BGRA”，具体行为依赖渲染器实现。
+        // 先交换 R/B，再走 GL_BGRA + REV 上传。三种组合的实测结果：
+        //   GL_RGBA  + UNSIGNED_BYTE        → gl4es 崩在 __memcpy_aarch64_simd
+        //   GL_BGRA  + REV，不交换          → 不崩，但画面红蓝反转
+        //   GL_BGRA  + REV，先交换          → 正确（本实现）
+        // 换成别的组合前请先在两套驱动上分别实测，不要按 GLES 规范推断。
         swapRgbaInPlace(buffer, width * height);
         buffer.position(0);
 
@@ -151,23 +175,34 @@ public class MCEFRenderer {
         }
     }
 
-    /** 由 RenderTickEvent.START 递增的纯 Java 帧序号；不在事件里做 JNI 或 GL。 */
+    /** 由 {@code RenderTickEvent.START} 递增的纯 Java 帧序号；事件里不做 JNI 或 GL。 */
     private static volatile long minecraftFrameId;
 
+    /** 由 {@code MCEFMod} 在 {@code RenderTickEvent.START} 调用；只 ++，别的什么都不做。 */
     public static void beginMinecraftFrame() {
         minecraftFrameId++;
     }
 
     /**
-     * 取 GL 纹理 id。这是帧上传的驱动点，不是 RenderTickEvent。
+     * 取 GL 纹理 id。
      *
-     * <p>WebDisplays 的 ScreenRenderer 会调本方法，紧接着
-     * {@code RenderSystem._setShaderTexture(0, texId)} 采样；此刻 GL 正处在
-     * 「准备画这张纹理」的完整状态，上传最安全。在 RenderTickEvent.START
-     * 里上传反而会让 MobileGlues 在 glTexImage2D 段错误。</p>
+     * <p><b>这是帧上传的唯一驱动点，不是 RenderTickEvent。</b>
+     * WebDisplays 的 ScreenRenderer 调本方法后紧接着
+     * {@code RenderSystem._setShaderTexture(0, texId)} 采样；此刻 GL 正处于
+     * 「准备画这张纹理」的完整状态，上传最安全。改到
+     * {@code RenderTickEvent.START}（帧最开头，可能还在切 FBO、用别的
+     * texture unit）上传会让 MobileGlues 在 {@code glTexImage2D} 段错误。</p>
      *
-     * <p>每个浏览器每个 Minecraft 渲染帧最多 pump 一次，内部一律用
-     * {@link #peekTextureID()}，绝不回调本方法。</p>
+     * <h3>两道限流，缺一不可</h3>
+     * <ol>
+     *   <li><b>按 MC 帧号去重</b>：WebDisplays 每个屏幕面、每个渲染 pass 都会调
+     *       本方法，不去重就是每帧几十上百次 {@code getFrameInfo}
+     *       （实测过 62258 次/帧）。</li>
+     *   <li><b>pump 内部只能用 {@link #peekTextureID()}</b>：回调链是
+     *       {@code getTextureID → beforeUse → MCEFBrowser.tick}，
+     *       tick 里若再调 getTextureID 就是自递归
+     *       （实测 -Xss2040k 下 6.2 万层、-Xss512k 下 7331 层）。</li>
+     * </ol>
      */
     public int getTextureID() {
         final Runnable pump = beforeUse;
@@ -181,13 +216,15 @@ public class MCEFRenderer {
         return textureId[0];
     }
 
-    /** 不触发 pump 的裸纹理 id，只用于内部初始化检查，防止 getTextureID→tick 递归。 */
+    /** 不触发 pump 的裸纹理 id。内部初始化检查专用 —— 见 {@link #getTextureID()} 的递归说明。 */
     public int peekTextureID() {
         return textureId[0];
     }
 
+    /** 上次放行 pump 的帧号；同一帧只放行一次。 */
     private long lastPumpFrameId = Long.MIN_VALUE;
 
+    /** 帧号守卫；synchronized 保证多渲染 pass 并发调用时也不会重复放行。 */
     private synchronized boolean claimPumpForFrame(long frameId) {
         if (lastPumpFrameId == frameId) return false;
         lastPumpFrameId = frameId;
@@ -226,7 +263,12 @@ public class MCEFRenderer {
     /**
      * 就地交换每像素的第 0 与第 2 字节（BGRA ↔ RGBA）。
      *
-     * <p>小端序下 BGRA 四字节读成 int 是 0xAARRGGBB，交换后为 0xAABBGGRR。</p>
+     * <p>小端序下 BGRA 四字节读成 int 是 {@code 0xAARRGGBB}，交换后为
+     * {@code 0xAABBGGRR}：保留 A 与 G（{@code 0xFF00FF00}），R 左移到 B 位、
+     * B 右移到 R 位。</p>
+     *
+     * <p>按 int 批量处理而不是逐字节，1280×720 是 92 万次循环 —— 逐字节要
+     * 370 万次。这是每帧都跑的热路径。</p>
      */
     private static void swapRgbaInPlace(ByteBuffer buffer, int pixelCount) {
         IntBuffer ints = buffer.order(ByteOrder.LITTLE_ENDIAN).asIntBuffer();

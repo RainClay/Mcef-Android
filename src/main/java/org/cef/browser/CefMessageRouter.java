@@ -30,13 +30,14 @@ import org.cef.handler.CefMessageRouterHandler;
 /**
  * JS 查询路由器。
  *
- * <p><b>在 Android 侧它只是个容器</b>：真正把 {@code window.cefQuery} 接住的是
- * {@code libmcef.so} → IPC → 启动器里的 Cefrium（那边用
- * {@code CefriumBrowser.setQueryHandler} 注册）。这里保持 JCEF 的形状
+ * <p><b>在 Android 侧它只是个容器，不路由任何东西。</b>保持 JCEF 的形状
  * （{@code create(...)} + {@code addHandler(...)}），让消费方代码不用改。</p>
  *
  * <p>注册路径：{@code client.addMessageRouter(CefMessageRouter.create(handler))}
- * → {@code CefClient} 把 handler 放进自己的查询处理器列表。</p>
+ * → {@link org.cef.CefClient} 把 handler 放进自己的列表。但<b>列表里的处理器
+ * 从来没有被调用过</b> —— 真正的查询走的是 host 侧的
+ * {@code setQueryHandler} → {@code sendDom} → native {@code dom_json} 那条路，
+ * 详见 {@link org.cef.handler.CefQueryCallbackHandler} 的类注释。</p>
  */
 public class CefMessageRouter {
 

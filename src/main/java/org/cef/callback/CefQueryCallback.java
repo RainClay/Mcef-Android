@@ -27,14 +27,16 @@ package org.cef.callback;
 /**
  * JS 查询（{@code window.cefQuery}）的响应回调。
  *
- * <p>Android 侧映射到 Cefrium 的 {@code CefriumBrowser.QueryCallback}：</p>
+ * <p>形状取自 Cefrium 的 {@code CefriumBrowser.QueryCallback}：</p>
  * <pre>
  * Cefrium: callback.success(String)             → 本接口 success(String)
  * Cefrium: callback.failure(int, String)        → 本接口 failure(int, String)
  * </pre>
  *
- * <p>注意 {@code query_id} 在 Cefrium 侧是由 SDK 分配的（{@code onQuery} 的第一个参数），
- * 消费方拿到的 queryId 只是透传，回填时应当用 SDK 给的那个，否则页面收不到结果。</p>
+ * <p><b>但 Cefrium 那边的回调在宿主进程里，MC 侧拿不到它的实例。</b>
+ * host 目前直接 {@code callback.success("ok")} 就算完事，真正的数据是用
+ * IPC 的 {@code {"event":"dom"}} 单独回传的。所以本接口在 MC 侧没有生产者 ——
+ * 见 {@link org.cef.handler.CefQueryCallbackHandler} 的类注释。</p>
  */
 public interface CefQueryCallback {
 

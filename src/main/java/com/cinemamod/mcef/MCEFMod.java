@@ -37,15 +37,20 @@ import org.apache.logging.log4j.Logger;
  * 带 {@link Mod} 注解的类，否则直接 FATAL：
  * {@code constructed 0 mods: [], but had 1 mods specified: [mcef]}。</p>
  *
- * <h3>帧驱动与上传时机</h3>
+ * <h3>帧驱动：本类只做一件事</h3>
  *
- * <p>RenderTickEvent 只递增一个纯 Java 帧序号，<b>不做 JNI、取帧或 GL 操作</b>。
- * 纹理真正被 WebDisplays 取用时，{@code getTextureID()} 才触发一次受帧序号
- * 限流的 pump。pump 内部用 {@code peekTextureID()} 检查纹理状态，绝不回调
- * {@code getTextureID()}，防止递归。</p>
+ * <p>整个 mod 在渲染事件里唯一的动作，就是在 {@code RenderTickEvent.START}
+ * 递增一个纯 Java 帧序号（{@link MCEFRenderer#beginMinecraftFrame()}）。
+ * <b>不做 JNI、不取帧、不做 GL</b>。</p>
  *
- * <p>这既避免每个屏幕面/渲染 pass 重复调用 {@code getFrameInfo}，也确保 GL 上传
- * 发生在真正取样纹理的渲染阶段。RenderTickEvent 不再承担帧上传。</p>
+ * <p>纹理真正的上传时机是 {@code MCEFRenderer.getTextureID()} ——
+ * WebDisplays 调它之后会立刻采样这张纹理，那一刻 GL 状态才是对的。
+ * 在 {@code RenderTickEvent.START}（帧最开头）上传会让 MobileGlues 在
+ * {@code glTexImage2D} 段错误（{@code libmobileglues.so+0x5971f0}）。</p>
+ *
+ * <p>帧序号的作用是限流：{@code getTextureID()} 每个 MC 帧只放行一次 pump，
+ * 否则 WebDisplays 每个屏幕面、每个渲染 pass 都会触发一次
+ * {@code getFrameInfo}（实测过 62258 次/帧）。</p>
  */
 @Mod("mcef")
 public class MCEFMod {
@@ -54,10 +59,10 @@ public class MCEFMod {
 
     public MCEFMod() {
         LOGGER.info("MCEF (Android/Cefrium) mod loaded");
-        // START 只递增纯 Java 帧序号；不在此事件里调用 JNI 或 GL。
         MinecraftForge.EVENT_BUS.addListener(this::onRenderTick);
     }
 
+    /** 只处理 START 相位；END 什么都不做。 */
     private void onRenderTick(TickEvent.RenderTickEvent event) {
         if (event.phase == TickEvent.Phase.START) {
             MCEFRenderer.beginMinecraftFrame();

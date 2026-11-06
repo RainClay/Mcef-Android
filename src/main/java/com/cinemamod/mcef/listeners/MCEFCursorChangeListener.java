@@ -28,10 +28,17 @@ import org.cef.misc.CefCursorType;
 /**
  * 光标类型变化监听。
  *
- * <p>WebDisplays 用它把页面里的 CSS cursor 同步到游戏内指针。
- * <b>Android 限制</b>：Cefrium 没有暴露光标类型回调，所以这个接口
- * 目前<b>不会被触发</b> —— 保留是为了让消费方代码能编译。
- * 真正要实现的话，需要 Cefrium 侧加 {@code setCursorChangeHandler}。</p>
+ * <p>WebDisplays 用它把页面里的 CSS cursor 同步到游戏内指针。</p>
+ *
+ * <p><b>目前不会被触发</b>：IPC 桥里没有 cursor 命令 —— native
+ * （{@code mcef_bridge.cpp}）和 host（{@code CefriumHostService}）两侧都搜不到
+ * 相关 cmd，Cefrium 也没暴露光标类型回调。{@link
+ * com.cinemamod.mcef.MCEFBrowser#setCursor} 只会把值转给已注册的监听者，
+ * 而注册者永远等不到事件。</p>
+ *
+ * <p>要真正支持，需要在 host 侧接上 Cefrium 的 cursor 回调、上报给 native、
+ * native 再加一条查询命令，最后由 MCEFBrowser 分发。保留本接口是为了让
+ * 消费方代码能编译并通过链接。</p>
  */
 public interface MCEFCursorChangeListener {
 

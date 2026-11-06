@@ -35,9 +35,19 @@ import org.cef.callback.CefQueryCallback;
  * 页面里调 {@code cefQuery({request, onSuccess, onFailure})}，
  * 这里收到 request、算完结果后调 {@link CefQueryCallback#success} 回传。</p>
  *
- * <p>Android 侧接法：{@code CefriumBrowser.setQueryHandler(policy, onQuery)}，
- * 其中 onQuery 的签名是 {@code (long queryId, String request, String origin, QueryCallback cb)}。
- * 桥接层负责把它包装成本接口的 {@link #onQuery}。</p>
+ * <p><b>本接口目前不会被调用</b>。实际数据流是另一条路：</p>
+ * <pre>
+ * 页面 window.cefriumQuery(request)
+ *   └── host: CefriumBrowser.setQueryHandler（anyOrigin 策略）
+ *         └── sendDom(id, request)  →  IPC {"event":"dom", ...}
+ *               └── native: mcef_host_set_dom_json → 存进 b->dom_json
+ *                     └── McefNative.getDomJson(handle)   ← 目前无人调用
+ * </pre>
+ *
+ * <p>也就是说 host 已经被注册成「把 request 当成 DOM 快照回来」，而
+ * {@link org.cef.CefClient#getQueryHandlers()} 里注册的处理器从来没有被分发。
+ * 要让本接口生效，需要在 {@code MCEFBrowser} 里加一条「收到 dom 事件 → 找处理器
+ * → 调 {@link #onQuery}」的分发逻辑。保留本接口是为了让消费方代码编译通过。</p>
  */
 public interface CefQueryCallbackHandler {
 
