@@ -44,14 +44,38 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
 /**
- * 第一版 Cefrium Host：
+ * Cefrium Host：启动器进程里的浏览器宿主。
  *
- * - 监听 127.0.0.1:39090；
- * - 接收 libmcef.so 的 JSON 行协议；
- * - 创建 OSR CefriumBrowser；
- * - 执行 loadUrl/eval/elementsAtPoint/domSnapshot；
- * - 通过 cefriumQuery 把 DOM JSON 回给 libmcef.so；
- * - OnPaint 帧暂时只记录日志，后续升级为二进制 frame IPC 或共享内存。
+ * <p>MC 侧（纯 OpenJDK，加载不到 android.*）通过 libmcef.so 发 JSON 行协议过来，
+ * 本类在 Android 进程里真正驱动 CefriumBrowser。两端的分工：</p>
+ *
+ * <pre>
+ * MC JVM ──JNI──▶ libmcef.so ──TCP 127.0.0.1:39090──▶ 本类 ──▶ CefriumBrowser
+ * </pre>
+ *
+ * <h3>命令</h3>
+ * <p>create / destroy / resize / loadUrl / eval / domSnapshot / elementsAtPoint /
+ * input / reload / goBack / goForward / stopLoading，分派见 {@code when (cmd)}。</p>
+ *
+ * <h3>回传</h3>
+ * <p>三类事件，都带 {@code id}：</p>
+ * <ul>
+ *   <li>{@code {"event":"frame"}} —— <b>二进制帧</b>：一行 JSON header
+ *       （size/w/h/stride）+ 紧随其后的裸像素。header 的 {@code size} 必须严格等于
+ *       {@code stride*h}，多一个字节 native 就拒收整帧。</li>
+ *   <li>{@code {"event":"dom"}} —— DOM JSON 文本。</li>
+ *   <li>{@code {"event":"url"}} —— 导航后的真实地址。</li>
+ * </ul>
+ *
+ * <h3>能力边界</h3>
+ * <ul>
+ *   <li><b>resize 无效</b>：CefriumBrowser 没有 resize API，真实尺寸在 create 时固定。
+ *       见 {@code handleResize}。</li>
+ *   <li><b>键盘不支持</b>：CefriumBrowser 无键盘 API。鼠标 move/down/up/wheel 是通的，
+ *       键盘事件走 {@code else} 分支记录后丢弃。</li>
+ *   <li><b>查询是单向的</b>：{@code setQueryHandler} 把 request 当 DOM 快照回传，
+ *       没有「Java 主动向页面查询」的通道。</li>
+ * </ul>
  */
 class CefriumHostService : Service() {
     private val running = AtomicBoolean(false)

@@ -254,7 +254,7 @@ fun LauncherSettingsScreen(
                         .fillMaxWidth()
                         .offset { IntOffset(x = 0, y = yOffset.roundToPx()) }
                 ) {
-                    // 引擎下载/状态：libcef.so 209MB，不打进 APK，按需下载
+                    // 引擎下载/状态：libcef.so 216.4MB，不打进 APK，按需下载
                     CefEngineSettingsCard(
                         modifier = Modifier.fillMaxWidth(),
                         position = CardPosition.Top
@@ -265,7 +265,7 @@ fun LauncherSettingsScreen(
                         position = CardPosition.Bottom,
                         unit = AllSettings.autoStartCefHost,
                         title = "启动时自动开启",
-                        summary = "关闭后不会自动启动内置浏览器，需要在游戏内手动触发。引擎未安装时无论如何都不会启动。"
+                        summary = "关闭后不会自动启动内置浏览器。引擎未下载时无论如何都不会启动。"
                     )
                 }
             }

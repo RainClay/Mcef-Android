@@ -71,7 +71,10 @@ class ZLApplication : Application(), SingletonImageLoader.Factory {
     }
 
     /**
-     * libcef.so 不在 APK 里，改由运行时从 filesDir/ceflib 加载（见 CefriumNativeLib）。
+     * libcef.so 默认不进 APK，由运行时从 filesDir/ceflib 加载（见 CefriumNativeLib）。
+     * preloader 的职责就是把这条路径告诉 SDK —— 若 APK 里恰好带了 so，
+     * CefriumNativeLib.isReady 会优先认它，preloader 不介入。
+     *
      * 必须在这里挂 preloader：SDK 的 CefriumInitProvider 是系统自动实例化的 ContentProvider，
      * 会在 Application.onCreate 之前就调 Cefrium.initialize()，attachBaseContext 是唯一更早的时机。
      *
@@ -204,7 +207,9 @@ class ZLApplication : Application(), SingletonImageLoader.Factory {
             // 两个前置判断，缺一不可：
             //   1) libcef.so 必须已就绪。它不再打进 APK，没下载时启动 host 毫无意义 ——
             //      只会出现 client 连上后一路 create deferred cefReady=false，看起来像卡死。
-            //   2) 用户允许自动启动。关掉后需要在设置里手动点「启动内置浏览器」。
+            //   2) 用户允许自动启动（AllSettings.autoStartCefHost）。
+            //      关掉后设置页没有手动启动入口，只有「下载引擎」按钮 ——
+            //      要手动拉起得自己 startService。
             val cefReady = CefriumNativeLib.isReady(this)
             val allowAuto = AllSettings.autoStartCefHost.getValue()
             if (cefReady && allowAuto) {

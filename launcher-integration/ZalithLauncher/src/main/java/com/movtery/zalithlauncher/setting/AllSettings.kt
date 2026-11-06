@@ -609,7 +609,9 @@ object AllSettings : SettingsRegistry() {
     /**
      * 启动时自动拉起 MCEF Host（监听 127.0.0.1:39090，供 MC 侧 libmcef.so 连接）。
      *
-     * 关掉后不会自动启动，需要在设置里手动点「启动内置浏览器」。
+     * 关掉后不会自动启动；设置页目前<b>没有</b>手动启动按钮，只有「下载引擎」
+     * （见 CefEngineSettingsCard）。要有手动入口得另行加一条 startService。
+     *
      * 无论开关如何，libcef.so 不存在时都不会启动 —— 没有引擎启动也没用，
      * 只会在 client 连上来之后一路 create deferred。
      */

@@ -8,8 +8,8 @@ This directory contains the selected source files changed or added in the Zalith
 - `mcef/CefriumNativeLib.kt`: runtime `libcef.so` readiness, preload and installation helpers.
 - `mcef/CefriumDownloader.kt`: download/extract/install helper for the Cefrium native library.
 - `mcef/CefriumHostService.kt`: Cefrium host service, IPC protocol handling, browser setup, frame/DOM forwarding, diagnostics and flags.
-- `setting/AllSettings.kt`, `ui/.../LauncherSettingsScreen.kt`, `ui/.../CefEngineSettingsCard.kt`: browser-engine setting and download UI.
-- `game/download/game/DownloadPolicy.kt`: game-download policy source added alongside the launcher changes.
+- `setting/AllSettings.kt`: adds `autoStartCefHost`; `ui/.../LauncherSettingsScreen.kt` and
+  `ui/.../CefEngineSettingsCard.kt`: browser-engine status, on-demand download button and the auto-start switch.
 
 The replacement `libmcef.so` binary is intentionally not included. Its C++/JNI source is in the `libmcef-source` branch of this repository. The launcher packages the built library under `jniLibs/arm64-v8a/`.
 
@@ -18,6 +18,17 @@ The replacement `libmcef.so` binary is intentionally not included. Its C++/JNI s
 These files are extracted from the Zalith Launcher source tree and depend on that tree's existing packages, Gradle catalog, settings framework, and Android app configuration. Copying them into an unrelated Android app is not sufficient.
 
 The host listens on `127.0.0.1:39090`. The Minecraft JVM side is a regular OpenJDK process and talks to it through `libmcef.so`; only the launcher's Android host process calls Cefrium directly.
+
+## Known gaps
+
+- **`resize` is a no-op** — Cefrium has no resize API; the browser size is fixed at `create`.
+- **No keyboard input** — `CefriumBrowser` exposes no key API. Mouse move/down/up/wheel work.
+- **Queries are one-way** — `setQueryHandler` replies with a DOM snapshot; there is no
+  Java-to-page query path.
+- **No manual host start button** — the settings card only downloads the engine. Turning off
+  auto-start leaves no in-app way to launch the host service.
+- **`libcef.so` is not bundled** by default (216.4 MB / 226,953,880 bytes). `CefriumNativeLib.isReady`
+  still accepts a copy found in the APK's `nativeLibraryDir` for pre-built variants.
 
 ## License and attribution
 

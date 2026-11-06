@@ -45,8 +45,10 @@ import kotlinx.coroutines.launch
 /**
  * 内置浏览器（CEF）引擎状态与下载入口。
  *
- * libcef.so 有 209MB，不再打进 APK，改成用户在这里按需下载 ——
- * 这样 APK 从 611MB 降到 418MB，不用内置浏览器的人不必为它付出体积。
+ * libcef.so 有 216.4MB（未压缩），不再打进 APK，改成用户在这里按需下载。
+ *
+ * 省下多少：APK 里两个架构的 libcef.so 合计未压缩 444MB、deflate 后 201MB。
+ * 去掉后 APK 从约 619MB 降到 418MB —— 不用内置浏览器的人不必为它付出体积。
  *
  * 已存在且大小正确时只显示「已就绪」，不会重复下载；
  * 所以也可以手工把 libcef.so 放到 filesDir/ceflib/ 跳过这一步。

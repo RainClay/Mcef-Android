@@ -31,15 +31,23 @@ import org.chromium.base.library_loader.NativeLibraryPreloader
 /**
  * libcef.so 的运行时加载与磁盘管理。
  *
- * 动机：libcef.so 单文件 209MB（未压缩），打进 APK 会让包体膨胀到 600MB+，
- * 而它只有真正用到内置浏览器时才需要。所以改成**不打包、按需下载**。
+ * 动机：libcef.so 单文件 216.4MB（226_953_880 字节，未压缩），打进 APK 会让包体
+ * 膨胀到 600MB+，而它只有真正用到内置浏览器时才需要。所以改成**不打包、按需下载**。
  *
  * 存放位置：`filesDir/ceflib/libcef.so`
  *   - 必须在应用私有目录：/storage 是 noexec，无法 dlopen；
  *     APK 的 nativeLibraryDir 只读，运行时写不进去。
  *   - 用绝对路径 System.load()，绕开 System.loadLibrary 对 nativeLibraryDir 的限定。
  *
- * 已经存在且大小匹配就跳过下载 —— 这样也可以手工把 libcef.so 拷进去直接用。
+ * 查找顺序（{@link #isReady}）：
+ *   1. APK 的 nativeLibraryDir —— 老版本把 so 打进过 APK，留着这条回退，
+ *      这样预打包的构建不用再下 216MB；
+ *   2. 私有目录的文件，按大小比对 {@link #EXPECTED_SIZE}。
+ *
+ * 只比大小不校验哈希：216MB 算一次 SHA 要好几秒，而大小不符（下载中断、
+ * 半截文件）已经能覆盖绝大多数失败情形。
+ *
+ * 已就绪就跳过下载 —— 也可以手工把 libcef.so 拷进去直接用。
  */
 object CefriumNativeLib {
 
