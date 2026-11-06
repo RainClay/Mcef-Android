@@ -35,19 +35,25 @@ import org.cef.callback.CefQueryCallback;
  * 页面里调 {@code cefQuery({request, onSuccess, onFailure})}，
  * 这里收到 request、算完结果后调 {@link CefQueryCallback#success} 回传。</p>
  *
- * <p><b>本接口目前不会被调用</b>。实际数据流是另一条路：</p>
+ * <p>调用链（2.3.0 起接通）：</p>
  * <pre>
- * 页面 window.cefriumQuery(request)
+ * 页面 cefQuery(request)
  *   └── host: CefriumBrowser.setQueryHandler（anyOrigin 策略）
- *         └── sendDom(id, request)  →  IPC {"event":"dom", ...}
- *               └── native: mcef_host_set_dom_json → 存进 b->dom_json
- *                     └── McefNative.getDomJson(handle)   ← 目前无人调用
+ *         └── IPC {"event":"query", queryId, request, origin}
+ *               └── native: mcef_host_push_query → 入队
+ *                     └── MCEFBrowser.tick() → McefNative.takeQuery(handle)
+ *                           └── 本接口的 onQuery(...)          ← 你在这里
+ *                                 └── callback.success(result)
+ *                                       └── IPC {"cmd":"queryReply"}
+ *                                             └── host 调 Cefrium 真正的 callback
  * </pre>
  *
- * <p>也就是说 host 已经被注册成「把 request 当成 DOM 快照回来」，而
- * {@link org.cef.CefClient#getQueryHandlers()} 里注册的处理器从来没有被分发。
- * 要让本接口生效，需要在 {@code MCEFBrowser} 里加一条「收到 dom 事件 → 找处理器
- * → 调 {@link #onQuery}」的分发逻辑。保留本接口是为了让消费方代码编译通过。</p>
+ * <p>必须绕回 host 的原因：只有 host 进程持有 Cefrium 的回调实例，
+ * MC 侧算出结果也没法直接答复页面。</p>
+ *
+ * <p>分发实现在 {@code MCEFBrowser.dispatchPendingQueries()}：每帧最多取 8 条，
+ * 按注册顺序遍历，第一个返回 {@code true} 的处理器算认领；全都不认领时
+ * 立刻按 {@code ERR_NOT_FOUND} 回填，免得页面干等到超时。</p>
  */
 public interface CefQueryCallbackHandler {
 

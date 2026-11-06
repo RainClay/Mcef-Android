@@ -33,10 +33,14 @@ package org.cef.callback;
  * Cefrium: callback.failure(int, String)        → 本接口 failure(int, String)
  * </pre>
  *
- * <p><b>但 Cefrium 那边的回调在宿主进程里，MC 侧拿不到它的实例。</b>
- * host 目前直接 {@code callback.success("ok")} 就算完事，真正的数据是用
- * IPC 的 {@code {"event":"dom"}} 单独回传的。所以本接口在 MC 侧没有生产者 ——
- * 见 {@link org.cef.handler.CefQueryCallbackHandler} 的类注释。</p>
+ * <p><b>Cefrium 的回调实例在宿主进程里，MC 侧拿不到。</b>所以这里不是直接
+ * 转发，而是每帧从 native 队列取查询后现造一个 —— 见
+ * {@code MCEFBrowser.QueryCallback}。它的 {@code success/failure} 会把结果
+ * 编码成 IPC {@code {"cmd":"queryReply"}} 发回 host，host 再调真正的 Cefrium
+ * callback 答复页面。</p>
+ *
+ * <p>一条查询只能答复一次：Cefrium 那边重复答复会被忽略，所以实现里用
+ * {@code AtomicBoolean} 挡住第二次调用。</p>
  */
 public interface CefQueryCallback {
 

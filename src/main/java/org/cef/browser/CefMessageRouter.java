@@ -34,9 +34,9 @@ import org.cef.handler.CefMessageRouterHandler;
  * （{@code create(...)} + {@code addHandler(...)}），让消费方代码不用改。</p>
  *
  * <p>注册路径：{@code client.addMessageRouter(CefMessageRouter.create(handler))}
- * → {@link org.cef.CefClient} 把 handler 放进自己的列表。但<b>列表里的处理器
- * 从来没有被调用过</b> —— 真正的查询走的是 host 侧的
- * {@code setQueryHandler} → {@code sendDom} → native {@code dom_json} 那条路，
+ * → {@link org.cef.CefClient} 把 handler 取出来放进自己的查询列表。
+ * 本类自己不参与分发 —— 分发由 {@code MCEFBrowser.dispatchPendingQueries()}
+ * 每帧从 native 队列取查询后遍历该列表完成，
  * 详见 {@link org.cef.handler.CefQueryCallbackHandler} 的类注释。</p>
  */
 public class CefMessageRouter {

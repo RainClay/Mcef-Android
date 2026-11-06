@@ -164,7 +164,7 @@ public final class McefNative {
 
     /** jar 内 so 的版本标记，改 so 时同步改这里，避免复用旧的解压文件。 */
     private static final class BuildStamp {
-        static final String VALUE = "2.2.1";
+        static final String VALUE = "2.3.0";
     }
 
     /** so 是从哪里加载的（"java.library.path" 或临时文件路径）。 */
@@ -194,7 +194,7 @@ public final class McefNative {
     // ── 浏览器 ────────────────────────────────────────────────────────────
 
     /**
-     * 创建浏览器，返回句柄（>0 成功，<=0 失败）。
+     * 创建浏览器，返回句柄（{@code >0} 成功，{@code <=0} 失败）。
      *
      * @param transparent 是否透明背景。true 时页面未绘制区域 alpha=0，
      *                    底层内容能透出来（WebDisplays 的屏幕需要）。
@@ -254,4 +254,25 @@ public final class McefNative {
                                           int width, int height, int stride);
 
     public static native int hostSetDomJson(long browser, String json);
+
+    /**
+     * 取一条待处理的 JS 查询。
+     *
+     * <p>返回 {@code String[4]}：{@code [queryId, persistent, request, origin]}，
+     * 没有待处理查询时返回 {@code null}。用 String 数组而不是自定义类，
+     * 是因为 JNI 侧构造对象要 FindClass + 构造器签名，动一下就静默失败。</p>
+     */
+    public static native String[] takeQuery(long browser);
+
+    /**
+     * 回填查询结果给 host 进程。
+     *
+     * <p>MC 侧算完结果必须回到 host 才能答复页面 —— 只有 host 持有 Cefrium 的
+     * callback 实例。</p>
+     *
+     * @param success {@code true} 走 {@code callback.success(result)}，
+     *                {@code false} 走 {@code callback.failure(errorCode, result)}
+     */
+    public static native int replyQuery(long browser, long queryId, boolean success,
+                                        String result, int errorCode);
 }

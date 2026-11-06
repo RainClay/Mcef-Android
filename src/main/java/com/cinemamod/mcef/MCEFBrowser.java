@@ -31,6 +31,8 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.cef.CefClient;
 import org.cef.browser.CefBrowser;
+import org.cef.callback.CefQueryCallback;
+import org.cef.handler.CefQueryCallbackHandler;
 import org.cef.browser.CefBrowserOsr;
 
 import java.awt.Rectangle;
@@ -113,6 +115,12 @@ public class MCEFBrowser extends CefBrowserOsr {
 
     /** 上次成功上传的帧版本；相同则跳过 JNI copyFrame 和纹理上传。 */
     private int lastVersion = -1;
+
+    /** 单次 tick 最多分发多少条查询，防止页面刷屏把渲染线程拖住。 */
+    private static final int MAX_QUERIES_PER_TICK = 8;
+
+    /** 查询分发防重入：处理器可能同步回调，也可能自己触发新的查询。 */
+    private final AtomicBoolean dispatchingQueries = new AtomicBoolean(false);
 
     public MCEFBrowser(MCEFClient client, String url, boolean transparent) {
         this(client, url, transparent, DEFAULT_WIDTH, DEFAULT_HEIGHT, true);
@@ -304,6 +312,139 @@ public class MCEFBrowser extends CefBrowserOsr {
      *       或 {@code == lastVersion} 时直接返回，不 copy、不 swap、不上传。</li>
      * </ul>
      */
+    /**
+     * 取走并分发 native 队列里的 JS 查询。
+     *
+     * <p>链路：页面 {@code cefQuery} → host 的 {@code setQueryHandler} 收到 request
+     * → IPC {@code {"event":"query"}} → native 入队 → 这里取出 → 交给
+     * {@link CefQueryCallbackHandler} 处理 → 结果经 {@code replyQuery} 回 host
+     * → host 调 Cefrium 的 callback 答复页面。</p>
+     *
+     * <p>为什么必须绕回 host：只有 host 进程持有 Cefrium 的 callback 实例，
+     * MC 侧算出结果也没法直接回页面。</p>
+     *
+     * <p>处理器同步返回的值决定这次查询是否被受理：{@code true} 表示已处理
+     * （可能异步，稍后自己调 callback），{@code false} 表示不认这条查询，
+     * 立刻按失败回填，免得页面一直等。</p>
+     */
+    private void dispatchPendingQueries() {
+        if (handle <= 0) return;
+        if (!dispatchingQueries.compareAndSet(false, true)) return; // 处理器回调里重入直接跳过
+        try {
+            for (int processed = 0; processed < MAX_QUERIES_PER_TICK; processed++) {
+                final String[] q;
+                try {
+                    q = McefNative.takeQuery(handle);
+                } catch (Throwable t) {
+                    LOGGER.error("takeQuery failed handle={}", handle, t);
+                    return;
+                }
+                if (q == null || q.length < 4) return; // 队列空了
+
+                final long queryId;
+                final boolean persistent;
+                try {
+                    queryId = Long.parseLong(q[0]);
+                    persistent = !"0".equals(q[1]);
+                } catch (NumberFormatException e) {
+                    LOGGER.warn("malformed query header: {} {}", q[0], q[1]);
+                    continue;
+                }
+                final String request = q[2];
+                final String origin = q[3];
+
+                if (!deliverQuery(queryId, request, persistent, origin)) {
+                    // 没人认领：立刻失败回填，否则页面的 cefQuery 要等到超时。
+                    replyFailure(queryId, McefNative.ERR_NOT_FOUND,
+                            "no query handler accepted this request");
+                }
+            }
+        } finally {
+            dispatchingQueries.set(false);
+        }
+    }
+
+    /**
+     * 把一条查询交给 client 注册的处理器，返回是否有处理器受理。
+     *
+     * <p>按注册顺序遍历，第一个返回 {@code true} 的处理器算认领。</p>
+     *
+     * <p>{@code queryHandlers} 是普通 ArrayList，而这里跑在渲染线程；注册虽发生在
+     * 初始化阶段，但处理器内部也可能再注册 —— 先复制一份再遍历，
+     * 避免 ConcurrentModificationException。</p>
+     */
+    private boolean deliverQuery(long queryId, String request, boolean persistent, String origin) {
+        final java.util.List<CefQueryCallbackHandler> handlers;
+        try {
+            handlers = new java.util.ArrayList<>(client.getHandle().getQueryHandlers());
+        } catch (Throwable t) {
+            LOGGER.error("cannot read query handlers", t);
+            return false;
+        }
+        if (handlers.isEmpty()) return false;
+
+        final CefQueryCallback callback = new QueryCallback(queryId, origin);
+        for (CefQueryCallbackHandler h : handlers) {
+            try {
+                if (h.onQuery(this, null, queryId, request, persistent, callback)) {
+                    return true;
+                }
+            } catch (Throwable t) {
+                LOGGER.error("query handler {} threw for queryId={}",
+                        h.getClass().getName(), queryId, t);
+            }
+        }
+        return false;
+    }
+
+    /** 把失败结果回填给 host。 */
+    private void replyFailure(long queryId, int errorCode, String message) {
+        try {
+            McefNative.replyQuery(handle, queryId, false, message, errorCode);
+        } catch (Throwable t) {
+            LOGGER.error("replyQuery(failure) failed queryId={}", queryId, t);
+        }
+    }
+
+    /**
+     * 交给处理器的回调：把结果转成 IPC 回填命令发回 host。
+     *
+     * <p>页面侧看到的就是这次 {@code cefQuery} 的 onSuccess / onFailure。
+     * 重复调用只认第一次 —— Cefrium 那边一条查询只能答复一次。</p>
+     */
+    private final class QueryCallback implements CefQueryCallback {
+        private final long queryId;
+        private final String origin;
+        private final AtomicBoolean replied = new AtomicBoolean(false);
+
+        QueryCallback(long queryId, String origin) {
+            this.queryId = queryId;
+            this.origin = origin;
+        }
+
+        @Override
+        public void success(String response) {
+            if (!replied.compareAndSet(false, true)) return;
+            try {
+                McefNative.replyQuery(handle, queryId, true,
+                        response == null ? "" : response, 0);
+            } catch (Throwable t) {
+                LOGGER.error("replyQuery(success) failed queryId={}", queryId, t);
+            }
+        }
+
+        @Override
+        public void failure(int errorCode, String errorMessage) {
+            if (!replied.compareAndSet(false, true)) return;
+            try {
+                McefNative.replyQuery(handle, queryId, false,
+                        errorMessage == null ? "" : errorMessage, errorCode);
+            } catch (Throwable t) {
+                LOGGER.error("replyQuery(failure) failed queryId={}", queryId, t);
+            }
+        }
+    }
+
     public void tick() {
         if (handle <= 0 || !pumping.compareAndSet(false, true)) return;
         try {
@@ -311,6 +452,10 @@ public class MCEFBrowser extends CefBrowserOsr {
                 renderer.initialize();
                 if (renderer.peekTextureID() == 0) return;
             }
+
+            // 查询分发必须放在帧版本门控之前：没有新帧时 version 不变会提前
+            // return，查询就会一直压在 native 队列里等到下一次重绘才处理。
+            dispatchPendingQueries();
 
             final int[] info = McefNative.getFrameInfo(handle);
             if (info == null || info.length < 5 || info[0] != McefNative.OK) return;

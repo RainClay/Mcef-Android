@@ -259,8 +259,8 @@ const char* const kTargetClasses[] = {
 | **`resize`** | ❌ 无效 | Cefrium SDK 没有 resize API，CEF 浏览器尺寸在 create 时固定；native 侧 `mcef_resize` 返回 `MCEF_ERR_UNSUPPORTED`。要别的尺寸只能在构造时给 |
 | **键盘输入** | ❌ 不支持 | `CefriumBrowser` 没有键盘 API。`sendKey*` 会发出去，host 侧记录「后端不支持」后丢弃。鼠标（move/down/up/wheel）是通的 |
 | **标题回调** | ❌ `getTitle()` 恒空串 | IPC 桥没有取标题的通道 |
-| **`sendQuery`** | ❌ 只记日志 | 只有「页面 → Java」方向能被 host 接住 |
-| **`CefQueryCallbackHandler`** | ❌ 不会被调用 | `CefClient` 里存了处理器，但从没有分发逻辑。实际数据走 `cefriumQuery → sendDom → dom_json`，而 `McefNative.getDomJson` 无调用方 |
+| **`sendQuery`** | ✅ 已通 | 2.3.0 起与 `cefriumQuery` 是同一条链路的两端，见下节 |
+| **`CefQueryCallbackHandler`** | ✅ 会被调用 | 每帧从 native 队列取查询分发给处理器，结果经 `queryReply` 回 host |
 | **光标监听** | ❌ 不会触发 | native 与 host 两侧都没有 cursor 命令，Cefrium 也没暴露回调 |
 | **资源拦截** | ⚠️ 只能放行/拦截 | 桥只给 URL，不能改写响应体 |
 | **子 frame** | ⚠️ 只支持主 frame | OSR 未区分 frame |
@@ -268,21 +268,36 @@ const char* const kTargetClasses[] = {
 
 鼠标输入的坐标是 **OSR 画布像素**，需要上层按屏幕方块尺寸换算。
 
-### 查询链路为什么是断的
+### 查询链路
 
-这是目前最值得补的一处。页面调 `window.cefriumQuery(request)` 后：
+页面调 `window.cefQuery(request)` 后，请求要走一个来回 —— 因为只有 host 进程
+持有 Cefrium 的 callback 实例，MC 侧算出结果也没法直接回页面：
 
 ```
-页面 window.cefriumQuery(request)
-  └── host: CefriumBrowser.setQueryHandler(anyOrigin)   ← 有注册
-        └── sendDom(id, request) → IPC {"event":"dom"}   ← 有回传
-              └── native: mcef_host_set_dom_json         ← 有存储
-                    └── McefNative.getDomJson(handle)    ← 无调用方 ✗
+页面 cefQuery(request)
+  └── host: setQueryHandler(anyOrigin)            └─ 存 callback 进 entry.pendingQueries
+        └── sendQuery → IPC {"event":"query"}         queryId/request/origin/persistent
+              └── native: mcef_host_push_query        入队（上限 64，超出丢最旧）
+                    └── McefNative.takeQuery(handle)  每帧取，最多 8 条
+                          └── CefQueryCallbackHandler.onQuery(...)   业务处理
+                                └── McefNative.replyQuery(...)
+                                      └── IPC {"cmd":"queryReply"}
+                                            └── host: entry.pendingQueries.remove(queryId)
+                                                  └── callback.success(result)   页面收到
 ```
 
-同时 `CefClient.queryHandlers` 里注册的 `CefQueryCallbackHandler` 从来没有被遍历。
-两端都通、中间没人接。补法：在 `MCEFBrowser` 收到 dom 事件时遍历
-`client.getHandle().getQueryHandlers()` 并分发。
+三个设计点：
+
+- **分发在帧版本门控之前**。`tick()` 里若先判 `version == lastVersion` 就返回，
+  没有新帧时查询会一直压到下次重绘 —— 而查询本身常常不引起重绘。
+- **没人认领就立刻失败**。处理器全返回 `false` 时直接按 `ERR_NOT_FOUND` 回填，
+  否则页面的 `cefQuery` 要等到自己超时。
+- **重复答复只认第一次**。Cefrium 一条查询只能答复一次，`QueryCallback` 用
+  `AtomicBoolean` 挡住第二次。
+
+历史上这里是断的：host 把 query 的 request 当成 DOM 快照 `sendDom` 出去，
+再 `callback.success("ok")`，页面拿到的永远是字符串 `ok`，WebDisplays 解析失败后
+请求直接作废。2.3.0 修掉了。
 
 ---
 
