@@ -249,7 +249,7 @@ const char* const kTargetClasses[] = {
 
 | 功能 | 状态 | 原因 |
 |---|---|---|
-| **`resize`** | ❌ 无效（0.11.0） | 该版本没有 resize API，尺寸在 create 时固定；native 侧 `mcef_resize` 返回 `MCEF_ERR_UNSUPPORTED`。**Cefrium 0.15.0 起有 `setSize`**，升级后可接（见 [cef-android#16](https://codeberg.org/cefrium/cef-android/issues/16)） |
+| **`resize`** | ✅ 支持（Cefrium ≥0.15.0） | native 转发 `{"cmd":"resize"}`，host 调 `CefriumBrowser.setSize()`。新尺寸的帧由 host 推回，本地不伪造 —— 伪造会导致「白屏且不再重绘」 |
 | **键盘输入** | ❌ 不支持 | `CefriumBrowser` 没有键盘 API。`sendKey*` 会发出去，host 侧记录「后端不支持」后丢弃。鼠标（move/down/up/wheel）是通的 |
 | **标题回调** | ❌ `getTitle()` 恒空串 | IPC 桥没有取标题的通道 |
 | **`sendQuery`** | ✅ 已通 | 2.3.0 起与 `cefriumQuery` 是同一条链路的两端，见下节 |
@@ -257,7 +257,7 @@ const char* const kTargetClasses[] = {
 | **光标监听** | ❌ 不会触发 | native 与 host 两侧都没有 cursor 命令，Cefrium 也没暴露回调 |
 | **资源拦截** | ⚠️ 只能放行/拦截 | 桥只给 URL，不能改写响应体 |
 | **子 frame** | ⚠️ 只支持主 frame | OSR 未区分 frame |
-| **页面视频** | ⚠️ 有声音无画面 | media router 打桩，未验证 |
+| **页面视频** | ⚠️ 取决于 Cefrium 版本 | 0.15.0 修了 OSR 视频不显示与全屏崩溃（[cef-android#16](https://codeberg.org/cefrium/cef-android/issues/16)）。0.11.0 及更早仍是有声音无画面 |
 
 鼠标输入的坐标是 **OSR 画布像素**，需要上层按屏幕方块尺寸换算。
 

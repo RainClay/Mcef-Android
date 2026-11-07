@@ -154,7 +154,13 @@ public final class McefNative {
 
     public static native int destroyBrowser(long browser);
 
-    /** 调整尺寸。native 侧目前是空操作（Cefrium 无 resize API）。 */
+    /**
+     * 调整浏览器尺寸。
+     *
+     * <p>转发 {@code {"cmd":"resize"}} 给 host，由 Cefrium 的
+     * {@code CefriumBrowser.setSize()} 真正执行（0.15.0 起支持）。
+     * 新尺寸的帧随后由 host 推回，本地不会伪造。</p>
+     */
     public static native int resize(long browser, int width, int height);
 
     public static native int loadUrl(long browser, String url);

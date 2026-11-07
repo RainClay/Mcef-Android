@@ -68,7 +68,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *
  * <h3>已知空缺</h3>
  * <ul>
- *   <li>{@link #resize}：native 返回 {@code ERR_UNSUPPORTED}（Cefrium 无此 API）</li>
  *   <li>{@link #getTitle}：恒空串（IPC 无取标题通道）</li>
  *   <li>{@link #sendQuery}：只支持「页面 → Java」方向</li>
  *   <li>键盘输入：会发出去，host 侧明确不支持</li>
@@ -531,10 +530,12 @@ public class MCEFBrowser extends CefBrowserOsr {
         viewWidth = Math.max(1, width);
         viewHeight = Math.max(1, height);
         if (handle > 0) {
-            // native 侧返回 MCEF_ERR_UNSUPPORTED：Cefrium SDK 没有 resize API，
-            // CEF 浏览器的实际尺寸在 create 时就固定了。这里调用只是为了
-            // 让 getBounds() 反映最新值，帧本身不会被重新排版。
-            // 需要别的尺寸就在构造时指定（见 createBrowser 的 4 参数版本）。
+            // 会真的生效：Cefrium 0.15.0 起有 CefriumBrowser.setSize()，
+            // native 把命令转发给 host。新尺寸的帧由 host 那边 OnPaint 推回来，
+            // 这里不伪造任何本地帧 —— 否则会出现「白屏且不再重绘」。
+            //
+            // viewWidth/viewHeight 立即更新是为了让 getBounds() 跟上；
+            // 缓存里的帧尺寸要等新帧到达才会变（见 tick() 的版本门控）。
             McefNative.resize(handle, viewWidth, viewHeight);
         }
     }

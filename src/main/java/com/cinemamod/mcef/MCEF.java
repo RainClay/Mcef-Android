@@ -183,9 +183,10 @@ public final class MCEF {
     /**
      * 创建浏览器并指定初始渲染尺寸。
      *
-     * <p>尺寸要在<b>这里</b>给定：native 侧 {@code resize} 返回
-     * {@code ERR_UNSUPPORTED}（Cefrium SDK 没有 resize API，CEF 浏览器尺寸在
-     * create 时固定），之后再改是无效的。</p>
+     * <p>这里给的是<b>初始</b>尺寸。之后仍可用 {@link MCEFBrowser#resize} 调整 ——
+     * Cefrium 0.15.0 起有 {@code setSize}，native 会转发给 host 真正执行。
+     * 但在构造时一次给对更省事：每次 resize 都要等 host 重新排版并推来新尺寸的帧，
+     * 中间那段仍是旧尺寸的画面。</p>
      *
      * <p>注意 WebDisplays 并不走本方法 —— 它是
      * {@code new WDClientBrowser(...) → super(...)} 直接进
