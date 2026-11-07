@@ -213,25 +213,18 @@ $ od -An -tx1 -N8 build/classes/java/main/com/cinemamod/mcef/MCEFBrowser.class
 `libmcef.so` 由 [`libmcef-source`](https://github.com/RainClay/Mcef-Android/tree/libmcef-source) 分支的
 `native/mcef_bridge/` 编译（CMake + NDK，`aarch64-linux-android-clang++`）。约 122 KB。
 
-`McefNative.load()` 两级回退：
+`McefNative.load()` 只有一条路：**`System.loadLibrary("mcef")`**。
+启动器把 so 放进 APK 的 `lib/arm64-v8a/`，`java.library.path` 里就有。
+失败时抛出的 `UnsatisfiedLinkError` 会带上 `java.library.path` 的实际取值。
 
-1. **`System.loadLibrary("mcef")`** —— 启动器已把 so 放进 APK 的 `lib/arm64-v8a/`，
-   `java.library.path` 里就有。这是常规路径。
-2. **从 jar 解压** —— jar 内有 `natives/arm64-v8a/libmcef.so` 时，解压到
-   `java.io.tmpdir/mcef-natives/` 再 `System.load`。这条给自带 so 的独立分发包用。
+**jar 里不带 so。** 早先有过「从 jar 内 `natives/arm64-v8a/` 解压到 `java.io.tmpdir`
+再 load」的回退，以及配套的 `-PwithNative` 打包开关，都已删除：
 
-解压目标必须是可执行目录：`/data/local/tmp` 在多数 Android 设备上挂 `noexec`，
-`dlopen` 会失败，所以用 `java.io.tmpdir`。
+- so 是启动器管的，mod jar 再带一份等于有两个版本源；
+- JNI 走 `RegisterNatives` 动态注册，版本错配报的是 `UnsatisfiedLinkError`，
+  从堆栈上看不出是版本对不上，排查成本远高于省下的那点便利。
 
-两条都失败时抛出的 `UnsatisfiedLinkError` 会带上两条路径各自的失败原因。
-实际走了哪条记在 `McefNative.getLoadedFrom()`。
-
-两种打包方式：
-
-```bash
-./gradlew build                    # 不含 so（走路径 1，依赖启动器预置）
-./gradlew build -PwithNative       # 把 natives/arm64-v8a/libmcef.so 打进 jar（走路径 2）
-```
+构建就是普通的 `./gradlew build`，产物完整可用。
 
 ### 桥的 JNI 注册
 
@@ -256,7 +249,7 @@ const char* const kTargetClasses[] = {
 
 | 功能 | 状态 | 原因 |
 |---|---|---|
-| **`resize`** | ❌ 无效 | Cefrium SDK 没有 resize API，CEF 浏览器尺寸在 create 时固定；native 侧 `mcef_resize` 返回 `MCEF_ERR_UNSUPPORTED`。要别的尺寸只能在构造时给 |
+| **`resize`** | ❌ 无效（0.11.0） | 该版本没有 resize API，尺寸在 create 时固定；native 侧 `mcef_resize` 返回 `MCEF_ERR_UNSUPPORTED`。**Cefrium 0.15.0 起有 `setSize`**，升级后可接（见 [cef-android#16](https://codeberg.org/cefrium/cef-android/issues/16)） |
 | **键盘输入** | ❌ 不支持 | `CefriumBrowser` 没有键盘 API。`sendKey*` 会发出去，host 侧记录「后端不支持」后丢弃。鼠标（move/down/up/wheel）是通的 |
 | **标题回调** | ❌ `getTitle()` 恒空串 | IPC 桥没有取标题的通道 |
 | **`sendQuery`** | ✅ 已通 | 2.3.0 起与 `cefriumQuery` 是同一条链路的两端，见下节 |

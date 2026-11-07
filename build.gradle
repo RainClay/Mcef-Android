@@ -59,16 +59,15 @@ tasks.withType(JavaCompile).configureEach {
     options.compilerArgs << '-Xlint:-deprecation' << '-Xlint:-unchecked' << '-Xlint:-options'
 }
 
-// so 的两种打包方式（对应 McefNative.load() 的两级回退）：
+// so 不进 jar。
 //
-//   A. 启动器预置：so 打进启动器 APK 的 lib/arm64-v8a/，
-//      System.loadLibrary("mcef") 直接命中。这是常规路径，jar 里不含 so。
-//   B. 独立分发：把 natives/arm64-v8a/libmcef.so 一起塞进 mod jar，
-//      加载时解压到 java.io.tmpdir 再 System.load。
-//      本仓库 1.20.1 分支的 test-builds/ 就是这种形态。
+// 只有一条加载路径：启动器把 libmcef.so 打进 APK 的 lib/arm64-v8a/，
+// MC 侧 System.loadLibrary("mcef") 命中。jar 里再带一份既是冗余，
+// 又会让「mod 版本」和「启动器里的 so 版本」有机会对不上 ——
+// 而 JNI 是动态注册，版本错配报的是 UnsatisfiedLinkError，
+// 看不出是版本问题。
 //
-// 注意 B 的解压目录必须是可执行目录：/data/local/tmp 在多数 Android
-// 设备上挂 noexec，dlopen 会失败。
+// 原来有个 -PwithNative 开关把 natives/ 塞进 jar，已删除。
 jar {
     archiveBaseName = 'mcef-forge'
     manifest {
@@ -77,20 +76,6 @@ jar {
                 'Implementation-Title'   : project.name,
                 'Implementation-Version' : project.version,
         ])
-    }
-}
-
-// 打包 so 的开关：-PwithNative（默认关，走 A 路径）。
-// 打开时把 native/mcef_bridge 编出来的 so 放进 jar。
-if (project.hasProperty('withNative')) {
-    def soPath = file("${projectDir}/natives/arm64-v8a/libmcef.so")
-    if (!soPath.exists()) {
-        throw new GradleException("withNative 已开启但缺文件: ${soPath}")
-    }
-    jar {
-        from(projectDir) {
-            include 'natives/**'
-        }
     }
 }
 

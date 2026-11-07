@@ -23,11 +23,6 @@
 
 package com.cinemamod.mcef.nativebridge;
 
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.nio.ByteBuffer;
 
 /**
@@ -49,17 +44,10 @@ import java.nio.ByteBuffer;
  * </pre>
  *
  * <h3>so 的加载方式</h3>
- * <p>两级，按顺序试：</p>
- * <ol>
- *   <li>启动器把 libmcef.so 打进 APK 的 {@code lib/arm64-v8a/}，
- *       {@code System.loadLibrary("mcef")} 直接命中 —— 这是常规路径；</li>
- *   <li>没有预置时，从 mod jar 内的 {@code /natives/arm64-v8a/libmcef.so}
- *       解压到 {@code java.io.tmpdir} 再 {@code System.load} —— 这条是为
- *       自带 so 的独立分发包准备的。</li>
- * </ol>
- *
- * <p>解压目标必须是可执行的目录。{@code /data/local/tmp} 在多数 Android 设备上
- * 挂 {@code noexec}，{@code dlopen} 会失败，所以用 {@code java.io.tmpdir}。</p>
+ * <p>只有一条：启动器把 libmcef.so 打进 APK 的 {@code lib/arm64-v8a/}，
+ * {@code System.loadLibrary("mcef")} 直接命中。mod jar 里不带 so ——
+ * 两个版本源一旦漂移，JNI 动态注册报的是 {@link UnsatisfiedLinkError}，
+ * 从堆栈上判断不出是版本对不上。</p>
  *
  * <h3>包名为什么能随便定</h3>
  * <p>libmcef.so 用 {@code JNI_OnLoad + RegisterNatives} 动态注册，符号名里不含包名。
@@ -100,74 +88,36 @@ public final class McefNative {
     /**
      * 加载 libmcef.so。
      *
-     * <p>两条路，按顺序试：</p>
-     * <ol>
-     *   <li>{@code System.loadLibrary("mcef")} —— 启动器已经把 so 放进 APK 的
-     *       {@code lib/arm64} 目录，而 {@code java.library.path} 里就包含它，
-     *       这是最快也最省事的路径；</li>
-     *   <li>从 jar 内 {@code /natives/arm64-v8a/libmcef.so} 解压到临时目录再
-     *       {@code System.load(绝对路径)} —— 适用于 so 跟 mod 一起打包的场景。</li>
-     * </ol>
+     * <p>只有一条路：{@code System.loadLibrary("mcef")}。启动器把 so 打进 APK 的
+     * {@code lib/arm64-v8a/}，而 {@code java.library.path} 里就包含它。</p>
      *
-     * <p>两条都失败时抛 {@link UnsatisfiedLinkError}，把已尝试的路径一并带上，
-     * 避免只看到一个干巴巴的 "no mcef in java.library.path"。</p>
+     * <p>jar 里不带 so。早先有个「从 jar 内 {@code /natives/arm64-v8a/} 解压到
+     * 临时目录再 load」的回退，已经删掉：</p>
+     * <ul>
+     *   <li>so 是启动器管的，mod jar 再带一份等于有两个版本源；</li>
+     *   <li>JNI 走 {@code RegisterNatives} 动态注册，版本错配报的是
+     *       {@link UnsatisfiedLinkError}，从堆栈上看不出是版本对不上，
+     *       排查成本远高于省下的那点便利。</li>
+     * </ul>
+     *
+     * <p>失败时抛 {@link UnsatisfiedLinkError}，消息里带上 {@code java.library.path}
+     * 的实际取值，免得只看到一句干巴巴的 "no mcef in java.library.path"。</p>
      */
     private static void load() {
-        // 1) 启动器已经把 so 放进 APK 的 lib/arm64-v8a/，java.library.path 里就能找到。
         try {
             System.loadLibrary("mcef");
             loadedFrom = "java.library.path";
-            return;
-        } catch (UnsatisfiedLinkError first) {
-            // 2) 测试包场景：so 跟 mod 一起放在 jar 的 natives/arm64-v8a/ 下。
-            //    解压到 app 私有目录再 System.load。用 java.io.tmpdir 而不是
-            //    /data/local/tmp —— 后者在多数设备上挂 noexec，dlopen 会失败。
-            try {
-                loadedFrom = extractAndLoad();
-                return;
-            } catch (Throwable second) {
-                final UnsatisfiedLinkError err = new UnsatisfiedLinkError(
-                        "libmcef.so 加载失败；"
-                                + "loadLibrary(\"mcef\") → " + first.getMessage()
-                                + "；jar 解压 → " + second);
-                err.initCause(second);
-                throw err;
-            }
+        } catch (UnsatisfiedLinkError e) {
+            final UnsatisfiedLinkError err = new UnsatisfiedLinkError(
+                    "libmcef.so 加载失败：启动器没有把 so 放进 APK 的 lib/arm64-v8a/。"
+                            + "java.library.path=" + System.getProperty("java.library.path")
+                            + "；原因：" + e.getMessage());
+            err.initCause(e);
+            throw err;
         }
     }
 
-    /** 从 jar 内的 natives/arm64-v8a/libmcef.so 解压并加载，返回实际路径。 */
-    private static String extractAndLoad() throws IOException {
-        final String res = "/natives/arm64-v8a/libmcef.so";
-        final File dir = new File(System.getProperty("java.io.tmpdir", "."), "mcef-natives");
-        if (!dir.exists() && !dir.mkdirs() && !dir.isDirectory()) {
-            throw new IOException("无法创建目录: " + dir);
-        }
-        final File so = new File(dir, "libmcef-" + BuildStamp.VALUE + ".so");
-        if (!so.exists() || so.length() == 0) {
-            try (InputStream in = McefNative.class.getResourceAsStream(res)) {
-                if (in == null) {
-                    throw new IOException("jar 内没有 " + res);
-                }
-                try (OutputStream out = new FileOutputStream(so)) {
-                    final byte[] buf = new byte[64 * 1024];
-                    int n;
-                    while ((n = in.read(buf)) > 0) {
-                        out.write(buf, 0, n);
-                    }
-                }
-            }
-        }
-        System.load(so.getAbsolutePath());
-        return so.getAbsolutePath();
-    }
-
-    /** jar 内 so 的版本标记，改 so 时同步改这里，避免复用旧的解压文件。 */
-    private static final class BuildStamp {
-        static final String VALUE = "2.3.0";
-    }
-
-    /** so 是从哪里加载的（"java.library.path" 或临时文件路径）。 */
+    /** so 是从哪里加载的。目前恒为 {@code "java.library.path"}。 */
     public static String getLoadedFrom() {
         return loadedFrom;
     }
