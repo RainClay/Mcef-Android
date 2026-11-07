@@ -281,20 +281,24 @@ int mcef_resize(mcef_browser_t browser, int width, int height) {
     std::lock_guard<std::mutex> lock(g_mutex);
     auto* b = find_browser_locked(browser); if (!b) return MCEF_ERR_NOT_FOUND;
     if (width <= 0 || height <= 0) return MCEF_ERR_INVALID_ARGUMENT;
+    if (width > kMaxBrowserWidth || height > kMaxBrowserHeight) return MCEF_ERR_INVALID_ARGUMENT;
 
-    // 空操作，尺寸一律以 mcef_create_browser 时的值为准。
+    // Cefrium 0.15.0 起有 CefriumBrowser.setSize()，Host 现在会真的改尺寸。
     //
-    // 原因：Host(Cefrium SDK) 侧没有公开的 resize API，CEF 浏览器的实际尺寸在
-    // create 时就固定了，Host 的 handleResize 也只是记录。这里若真的改尺寸：
-    //   1) 已发布的帧快照会被换成一张全透明帧，frame_version++；
-    //   2) 客户端下一次 tick 看到版本变化，就把这一整帧全透明内容上传成纹理
-    //      → 界面瞬间变空白；
-    //   3) 页面静止时没有新的 damage，CEF 不再回调 OnPaint，于是没有新帧来覆盖
-    //      这张空白帧，白屏会一直留着——表现为"点一下界面就白 / 打不开"。
-    // 同时 CEF 仍按旧尺寸出帧，缓存与真实帧尺寸不一致还会让 mcef_copy_frame
-    // 的校验/stride 对不上，所以不能假装 resize 已经成功。
-    set_error_locked("resize unsupported by IPC host");
-    return MCEF_ERR_UNSUPPORTED;
+    // 关键点：这里只发命令，**不动已发布的帧快照，也不改 b->width/height**。
+    // 早先之所以把 resize 做成空操作，是因为若在本地先把缓存换成一张新尺寸的
+    // 全透明帧并 frame_version++：
+    //   1) 客户端下一次 tick 看到版本变化，就把这张全透明帧上传成纹理 → 瞬间白屏；
+    //   2) 页面静止时没有新的 damage，CEF 不再回调 OnPaint，没有新帧来覆盖，
+    //      白屏就一直留着——表现为"点一下界面就白 / 打不开"。
+    //
+    // 现在改成等 Host 那边真正 setSize 之后推来的新帧：那条路径走
+    // mcef_host_set_frame，它会用帧自带的 width/height/stride 更新缓存
+    // （见该函数），所以尺寸是跟着真实帧走的，不存在"缓存与真实帧不一致"。
+    ipc_send_if_enabled("{\"cmd\":\"resize\",\"id\":" + std::to_string(browser) +
+        ",\"width\":" + std::to_string(width) +
+        ",\"height\":" + std::to_string(height) + "}");
+    return MCEF_OK;
 }
 
 int mcef_load_url(mcef_browser_t browser, const char* url) {
