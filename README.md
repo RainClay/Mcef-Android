@@ -13,9 +13,11 @@
 
 | 分支 | 目标平台 | 状态 | 说明 |
 |---|---|---|---|
-| `main` | — | — | 文档 + 架构说明（本分支） |
+| `main` | — | — | 文档 + 架构说明 |
 | [`1.20.1`](../../tree/1.20.1) | MC 1.20.1 Forge | **实机验证可用** | 走 JNI + IPC，是最完整的实现 |
 | [`26.1.2`](../../tree/26.1.2) | MC 26.1.2 | 早期探索 | 直连 Cefrium，接口尚不完整 |
+| [`libmcef-source`](../../tree/libmcef-source) | — | — | `libmcef.so` 的 C++ 源码（CMake + NDK） |
+| [`launcher-integration`](../../tree/launcher-integration) | — | — | 启动器侧的 `.cefhost` 宿主代码 |
 
 **想直接能用 → 取 `1.20.1`。**
 
@@ -122,15 +124,23 @@ Android 上 `/data/local/tmp` 之类临时目录常挂 `noexec`，从 jar 解压
 `System.load` 会失败。启动器把 `libmcef.so` 打进 APK 的 `lib/arm64-v8a/`，
 `System.loadLibrary("mcef")` 即可 —— 权限和 SELinux 上下文都是对的。
 
+**jar 里不留第二份。** 早先做过「jar 内含 `natives/arm64-v8a/libmcef.so`、
+加载时解压到 `java.io.tmpdir`」的回退，以及配套的 `-PwithNative` 打包开关，
+都已删除：
+
+- so 归启动器管，mod jar 再带一份等于有两个版本源；
+- JNI 走 `RegisterNatives` 动态注册，版本错配报的是 `UnsatisfiedLinkError`，
+  从堆栈上看不出是版本对不上，排查成本远高于省下的那点便利。
+
 ---
 
 ## 已知限制
 
 | 功能 | 状态 | 原因 |
 |---|---|---|
-| **投屏（MediaRouter）** | ⚠️ 需 stub | Cefrium 0.11.0 把 `androidx.mediarouter` 声明为 Maven 依赖；用本地 AAR 文件依赖时该依赖丢失，播放视频会因 `NoClassDefFoundError` 崩溃。需补 10 个 stub 类 |
-| **视频画面** | ❌ 有声音无画面 | OSR 模式下硬件解码的视频帧走 GPU overlay 路径，`OnPaint` 拿不到。已尝试 `disable-accelerated-video-decode`，仍未解决 |
-| **`resize`** | ⚠️ 仅本地记录 | Cefrium 无 resize API，帧尺寸固定于创建时 |
+| **投屏（MediaRouter）** | ⚠️ 需 stub | Cefrium 把 `androidx.mediarouter` 声明为 Maven 依赖；用本地 AAR 文件依赖时该依赖丢失，播放视频会因 `NoClassDefFoundError` 崩溃。0.17.1 实测仍有 21 个 Chromium 类引用它（`BrowserMediaRouter`、`ChromeMediaNotificationControllerDelegate` 等），换成 Maven 坐标才不用自己补 stub |
+| **视频画面** | ⚠️ 取决于版本 | 0.15.0 修了 OSR 视频不显示与全屏崩溃（[cef-android#16](https://codeberg.org/cefrium/cef-android/issues/16)）。0.11.0 及更早是有声音无画面 |
+| **`resize`** | ✅ 支持（Cefrium ≥0.15.0） | native 转发 `{"cmd":"resize"}`，host 调 `CefriumBrowser.setSize()`。新尺寸的帧由 host 推回，本地不伪造 —— 伪造会导致「白屏且不再重绘」 |
 | **键盘输入** | ⚠️ 部分 | Cefrium 有 `sendKeyEvent(KeyEvent)`，但需把 GLFW 键码转成 Android KeyEvent，尚未实现 |
 
 `libcef.so` 本身**带** H.264 / AAC（`H264Decoder` / `avc1` / `mp4a` 符号都在），

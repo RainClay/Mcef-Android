@@ -27,7 +27,7 @@ The host listens on `127.0.0.1:39090`. The Minecraft JVM side is a regular OpenJ
   Java-to-page query path.
 - **No manual host start button** — the settings card only downloads the engine. Turning off
   auto-start leaves no in-app way to launch the host service.
-- **`libcef.so` is not bundled** by default (216.4 MB / 226,953,880 bytes). `CefriumNativeLib.isReady`
+- **`libcef.so` is not bundled** by default (201.8 MB / 211,552,920 bytes). `CefriumNativeLib.isReady`
   still accepts a copy found in the APK's `nativeLibraryDir` for pre-built variants.
 
 ## License and attribution

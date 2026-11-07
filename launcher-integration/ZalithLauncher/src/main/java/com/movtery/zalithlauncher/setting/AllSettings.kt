@@ -616,4 +616,19 @@ object AllSettings : SettingsRegistry() {
      * 只会在 client 连上来之后一路 create deferred。
      */
     val autoStartCefHost = boolSetting("autoStartCefHost", true)
+
+    /**
+     * 允许页面不经用户点击就播放音视频。
+     *
+     * Chromium 默认要求媒体播放由用户手势触发（和桌面 Chrome 一样），
+     * 落到 OSR 上就是：页面自己 `audio.play()` 会被拦，只有真的点一下才行。
+     * 但 MC 里没有可靠的"点一下"—— 输入是 mouse down/up 转发过去的，
+     * 播放器控件那一小块未必能命中。
+     *
+     * 打开后调 CefriumBrowser.setMediaPlaybackRequiresUserGesture(false)
+     * （Cefrium 0.16.0 起有），行为对齐 WebView 的
+     * setMediaPlaybackRequiresUserGesture。默认开：MC 里页面是嵌在方块/贴图上的，
+     * 指望用户精准点到播放按钮不现实。
+     */
+    val cefMediaPlaybackWithoutGesture = boolSetting("cefMediaPlaybackWithoutGesture", true)
 }

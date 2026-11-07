@@ -20,6 +20,7 @@ import android.view.Choreographer
 import androidx.core.app.NotificationCompat
 import com.cefrium.Cefrium
 import com.cefrium.CefriumBrowser
+import com.movtery.zalithlauncher.setting.AllSettings
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.BufferedWriter
@@ -888,6 +889,20 @@ class CefriumHostService : Service() {
                     fileLog("RENDER PROCESS TERMINATED id=$id status=$status code=$code")
                 }
                 browser.setJavaScriptEnabled(true)
+
+                // 媒体自动播放：Chromium 默认要用户手势，OSR 里"点一下"未必点得中
+                // 播放器控件（输入是 mouse down/up 转发，坐标来自 MC 的 raycast）。
+                // 设置里可关，默认开。Cefrium 0.16.0 起有这个方法，老版本没有 ——
+                // 所以 runCatching 包一层，失败就退回 Chromium 默认行为。
+                if (AllSettings.cefMediaPlaybackWithoutGesture.getValue()) {
+                    runCatching {
+                        browser.setMediaPlaybackRequiresUserGesture(false)
+                    }.onSuccess {
+                        fileLog("create media playback without gesture id=$id")
+                    }.onFailure {
+                        fileLog("create setMediaPlaybackRequiresUserGesture failed id=$id", it)
+                    }
+                }
 
                 fileLog("create loading url id=$id url=$url")
                 mainNative("create loadUrl id=$id") { browser.loadUrl(url) }

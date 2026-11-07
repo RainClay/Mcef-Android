@@ -254,7 +254,7 @@ fun LauncherSettingsScreen(
                         .fillMaxWidth()
                         .offset { IntOffset(x = 0, y = yOffset.roundToPx()) }
                 ) {
-                    // 引擎下载/状态：libcef.so 216.4MB，不打进 APK，按需下载
+                    // 引擎下载/状态：libcef.so 201.8MB，不打进 APK，按需下载
                     CefEngineSettingsCard(
                         modifier = Modifier.fillMaxWidth(),
                         position = CardPosition.Top
@@ -262,10 +262,19 @@ fun LauncherSettingsScreen(
 
                     SwitchSettingsCard(
                         modifier = Modifier.fillMaxWidth(),
-                        position = CardPosition.Bottom,
+                        position = CardPosition.Middle,
                         unit = AllSettings.autoStartCefHost,
                         title = "启动时自动开启",
                         summary = "关闭后不会自动启动内置浏览器。引擎未下载时无论如何都不会启动。"
+                    )
+
+                    SwitchSettingsCard(
+                        modifier = Modifier.fillMaxWidth(),
+                        position = CardPosition.Bottom,
+                        unit = AllSettings.cefMediaPlaybackWithoutGesture,
+                        title = "允许页面自动播放",
+                        summary = "不开时页面必须由用户点击才能播放音视频（Chromium 默认）。" +
+                                "MC 里播放器控件不好点准，所以默认开。改完对之后新建的浏览器生效。"
                     )
                 }
             }
