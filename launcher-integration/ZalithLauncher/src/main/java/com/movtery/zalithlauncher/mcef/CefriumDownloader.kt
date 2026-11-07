@@ -33,8 +33,8 @@ import kotlinx.coroutines.withContext
 /**
  * 下载并安装 libcef.so。
  *
- * 做法：下载 cefrium-sdk 0.11.0 的 AAR（242.8MB），从里面只抽出
- * `jni/arm64-v8a/libcef.so`（216.4MB / 226_953_880 字节）落到私有目录，
+ * 做法：下载 cefrium-sdk 0.17.1 的 AAR（236.5MB），从里面只抽出
+ * `jni/arm64-v8a/libcef.so`（201.8MB / 211_552_920 字节）落到私有目录，
  * AAR 本身用完即删。
  *
  * 为什么不直接下载裸的 .so：Maven Central 只有 AAR 这个分发形式，

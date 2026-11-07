@@ -31,7 +31,7 @@ import org.chromium.base.library_loader.NativeLibraryPreloader
 /**
  * libcef.so 的运行时加载与磁盘管理。
  *
- * 动机：libcef.so 单文件 216.4MB（226_953_880 字节，未压缩），打进 APK 会让包体
+ * 动机：libcef.so 单文件 201.8MB（211_552_920 字节，未压缩），打进 APK 会让包体
  * 膨胀到 600MB+，而它只有真正用到内置浏览器时才需要。所以改成**不打包、按需下载**。
  *
  * 存放位置：`filesDir/ceflib/libcef.so`
@@ -41,10 +41,10 @@ import org.chromium.base.library_loader.NativeLibraryPreloader
  *
  * 查找顺序（{@link #isReady}）：
  *   1. APK 的 nativeLibraryDir —— 老版本把 so 打进过 APK，留着这条回退，
- *      这样预打包的构建不用再下 216MB；
+ *      这样预打包的构建不用再下 200MB；
  *   2. 私有目录的文件，按大小比对 {@link #EXPECTED_SIZE}。
  *
- * 只比大小不校验哈希：216MB 算一次 SHA 要好几秒，而大小不符（下载中断、
+ * 只比大小不校验哈希：200MB 算一次 SHA 要好几秒，而大小不符（下载中断、
  * 半截文件）已经能覆盖绝大多数失败情形。
  *
  * 已就绪就跳过下载 —— 也可以手工把 libcef.so 拷进去直接用。
@@ -53,8 +53,8 @@ object CefriumNativeLib {
 
     private const val TAG = "MCEF/CefNative"
 
-    /** 0.11.0 的 libcef.so 字节数；用于判断落盘的文件是否完整。 */
-    const val EXPECTED_SIZE: Long = 226_953_880L
+    /** 0.17.1 的 libcef.so 字节数；用于判断落盘的文件是否完整。 */
+    const val EXPECTED_SIZE: Long = 211_552_920L
 
     private const val DIR_NAME = "ceflib"
     private const val LIB_NAME = "libcef.so"
@@ -62,12 +62,13 @@ object CefriumNativeLib {
     /**
      * 可复现的下载源（cefrium-sdk AAR）。
      *
-     * 0.11.0 只发在 Codeberg 的 Maven registry，Maven Central 还停在 0.10.2，
-     * 所以这里用 Codeberg 的地址。实测下载速度约 6MB/s，比预想快得多。
-     * 等它同步到 Maven Central 后可以换回 repo1.maven.org。
+     * 只发在 Codeberg 的 Maven registry，Maven Central 上没有，所以用 Codeberg 的地址。
+     *
+     * 0.17.1 的 AAR 是 236.5MB（其中 libcef.so 占 211.5MB），下载耗时较长，
+     * 且实测偶尔会截断 —— 所以下来之后必须按 EXPECTED_SIZE 校验，见 downloadAndInstall。
      */
     const val AAR_URL =
-        "https://codeberg.org/api/packages/cefrium/maven/com/cefrium/cefrium-sdk/0.11.0/cefrium-sdk-0.11.0.aar"
+        "https://codeberg.org/api/packages/cefrium/maven/com/cefrium/cefrium-sdk/0.17.1/cefrium-sdk-0.17.1.aar"
 
     fun dir(context: Context): File = File(context.filesDir, DIR_NAME)
 

@@ -938,18 +938,40 @@ class CefriumHostService : Service() {
         }
     }
 
-    // resize 目前不支持，且与 native 侧保持一致：mcef_resize() 直接返回
-    // MCEF_ERR_UNSUPPORTED，不会再发这条命令。
-    //
-    // 这里刻意不去改 entry.width/height：CEF 浏览器的真实尺寸在 create 时就固定了，
-    // 记下一个并未生效的尺寸只会让后续帧尺寸校验的依据变得不可信。
-    // 真要做 resize 只有两条路：SDK 暴露 resize API，或 destroy + 重新 create。
+    /**
+     * 改变浏览器尺寸。
+     *
+     * Cefrium 0.15.0 起有 {@code setSize(w,h)}（此前没有，resize 是空操作）。
+     * 必须在主线程调用 —— 它内部走 {@code checkNative} + native 调用。
+     *
+     * 成功后才更新 entry 的宽高：这两个值是后续帧尺寸校验的依据，
+     * 记下一个并未生效的尺寸会让校验失去意义。
+     */
     private fun handleResize(json: JSONObject) {
         val id = json.optLong("id", 0L)
         val width = json.optInt("width", 0)
         val height = json.optInt("height", 0)
-        browsers[id] ?: return
-        fileLog("resize id=$id ${width}x$height ignored (CefriumBrowser 无 resize API)")
+        if (width <= 0 || height <= 0) {
+            fileLog("resize id=$id rejected (invalid size ${width}x$height)")
+            return
+        }
+        val entry = browsers[id] ?: return
+        if (entry.width == width && entry.height == height) return  // 尺寸没变，别惊动 CEF
+
+        mainHandler.post {
+            runCatching {
+                entry.browser.setSize(width, height)
+            }.onSuccess {
+                entry.width = width
+                entry.height = height
+                // 尺寸变了，上一帧的像素数不再适用，重新起算"多久没出帧"。
+                entry.lastFrameBytes = 0
+                lastPaintProgressAt = System.currentTimeMillis()
+                fileLog("resize id=$id ${width}x$height ok")
+            }.onFailure {
+                fileLog("resize id=$id ${width}x$height failed", it)
+            }
+        }
     }
 
     /**
