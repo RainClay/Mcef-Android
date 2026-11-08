@@ -130,11 +130,77 @@ Android 上 `/data/local/tmp` 之类临时目录常挂 `noexec`，从 jar 解压
 |---|---|---|
 | **投屏（MediaRouter）** | ⚠️ 需 stub | Cefrium 0.11.0 把 `androidx.mediarouter` 声明为 Maven 依赖；用本地 AAR 文件依赖时该依赖丢失，播放视频会因 `NoClassDefFoundError` 崩溃。需补 10 个 stub 类 |
 | **视频画面** | ❌ 有声音无画面 | OSR 模式下硬件解码的视频帧走 GPU overlay 路径，`OnPaint` 拿不到。已尝试 `disable-accelerated-video-decode`，仍未解决 |
-| **`resize`** | ⚠️ 仅本地记录 | Cefrium 无 resize API，帧尺寸固定于创建时 |
-| **键盘输入** | ⚠️ 部分 | Cefrium 有 `sendKeyEvent(KeyEvent)`，但需把 GLFW 键码转成 Android KeyEvent，尚未实现 |
+| **`resize`** | ✅ 支持 | Cefrium ≥0.15.0 有 `setSize()`，native 转发 `{"cmd":"resize"}`。新尺寸的帧由 host 推回，本地不伪造 —— 伪造会导致「白屏且不再重绘」 |
+| **键盘输入** | ❌ 未接 | 链路本身是通的（`sendKeyPress/Release/Typed` → `McefNative.sendInput` → IPC），host 侧 `handleInput` 的 `type=4/5/6` 仍走拒绝分支。Cefrium 0.18.0 已有 `sendKeyEvent(int,int,int,int,char)`，接上即可 |
 
 `libcef.so` 本身**带** H.264 / AAC（`H264Decoder` / `avc1` / `mp4a` 符号都在），
 所以视频问题不是编解码器缺失。
+
+### 鼠标坐标：不用换算，但画布不能小于屏幕分辨率
+
+WebDisplays 传给 `sendMouseMove/Press/Release/Wheel` 的坐标，就是它给该方块屏幕
+设定的分辨率（`ScreenData.resolution`），原样透传，自己不做缩放。所以上层
+**不需要**按方块尺寸再换算一次。
+
+要保证的是反过来的方向：**CEF 画布不能小于屏幕分辨率**。画布曾经是 1280×720，
+而屏幕按 `max_resolution_x/y`（默认 1920×1080）算出的坐标能到 x=1536 / y=894，
+越界后 CEF 直接丢弃整个事件 —— 表现为屏幕右侧和下半部分完全点不动。
+画布提到 1920×1080 覆盖上限后恢复正常，边界值只做 clamp 兜底。
+
+---
+
+## 一个踩过的坑：怎么测量决定了你能看见什么
+
+`cefrium#18` 报过一次「`addDocumentStartJavaScript` 注册成功但从不执行」，
+结论是**错的** —— API 一直是好的，错的是测量方法。记录在这里，因为同类错误很容易重犯。
+
+当时的做法：同一个脚本走两条路径注入（document-start 和
+`evaluateJavaScript` 兜底），靠末尾一行 `alert()` 观察哪条执行了。
+
+脚本开头有幂等守卫：
+
+```js
+if (Object.prototype.hasOwnProperty.call(window, '__mcefDesktopSpoof')) return;
+```
+
+于是**先跑的路径赢了，后跑的静默 return，末尾的 `alert()` 永远到不了。**
+每次导航只看到一个 `alert`，我据此断言「只有兜底跑了」。
+
+但「document-start 先跑、兜底被守卫拦掉」和「document-start 没跑、兜底跑了」
+产生**完全相同**的观测结果 —— 一次 `alert`。我没把这种歧义当成疑点，而是直接
+选了一个解释。
+
+最小复测工程（探针不含守卫）两条都出现，而且 `DOCSTART` 早于 `FALLBACK`：
+
+```
+PROBE  DOCSTART  type=0 message=[DOCSTART]
+PROBE  FALLBACK  type=0 message=[FALLBACK]
+```
+
+### 由此得出的两条规则
+
+**1. 观测代码必须早于任何提前返回。** 探针要是第一条语句：
+
+```js
+alert('PROBE src=docstart');                    // 先观测
+if (window.__mcefDesktopSpoof) return;          // 再决定要不要干活
+```
+
+**2. 两条路径必须能区分来源。** 现在兜底注入前先写
+`window.__MCEF_INJECT_SRC__='fallback'`，脚本头部据此选择告警文本，
+日志里直接是 `PROBE src=docstart` 或 `PROBE src=fallback`。
+
+另外，兜底不再无条件注入 —— 先回读 `window.__mcefSpoofSrc`，
+document-start 已生效就跳过：
+
+```
+create desktop spoof js id=1 size=4790
+JSDIAG ... msg=PROBE src=docstart
+fallback skipped id=1 (document-start already applied)
+```
+
+**判断一个 API「不工作」之前，先确认你的观测手段在该 API 工作与否时会产生不同结果。**
+这次的观测手段不能。
 
 ---
 
