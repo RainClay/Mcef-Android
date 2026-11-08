@@ -7,17 +7,24 @@
 首个目标：[**WebDisplays**](https://github.com/CinemaMod/webdisplays) —— 在 MC 世界里
 创建浏览器屏幕的 mod。
 
+> **想直接用**：取 [`v2.2.0-1.20.1-android`](../../releases/tag/v2.2.0-1.20.1-android)
+> 的测试包（mod jar + 启动器 APK + `libmcef.so`），或按下表切到对应分支自行构建。
+> 注意 release 是 2.2.0 测试包，`1.20.1` 分支源码已到 **2.3.1**（so 不再进 jar），
+> 两者打包方式不同，以分支 README 为准。
+
 ---
 
 ## 分支说明
 
-| 分支 | 目标平台 | 状态 | 说明 |
-|---|---|---|---|
-| `main` | — | — | 文档 + 架构说明（本分支） |
-| [`1.20.1`](../../tree/1.20.1) | MC 1.20.1 Forge | **实机验证可用** | 走 JNI + IPC，是最完整的实现 |
-| [`26.1.2`](../../tree/26.1.2) | MC 26.1.2 | 早期探索 | 直连 Cefrium，接口尚不完整 |
+| 分支 | 内容 | 状态 |
+|---|---|---|
+| `main` | 项目总览与架构说明（本分支） | — |
+| [`1.20.1`](../../tree/1.20.1) | MC 1.20.1 Forge 侧的 `org.cef.*` / `com.cinemamod.mcef.*` 兼容层 | **实机验证可用**，最完整 |
+| [`libmcef-source`](../../tree/libmcef-source) | `libmcef.so` 的 C++/JNI 源码（CMake + NDK） | 可构建 |
+| [`launcher-integration`](../../tree/launcher-integration) | Zalith Launcher 侧的 `.cefhost` 集成源码（overlay，非独立工程） | 可集成 |
+| [`26.1.2`](../../tree/26.1.2) | 直连 Cefrium 的早期探索版 | 接口不全，**不能用于 MC** |
 
-**想直接能用 → 取 `1.20.1`。**
+四个实现分支各有独立 README；`1.20.1` 那份最详细（架构、帧驱动、踩坑记录、能力边界）。
 
 ---
 
@@ -49,7 +56,7 @@ public void CefriumBrowser.sendKeyEvent(android.view.KeyEvent);
 
 ---
 
-## 最终架构（`1.20.1` 分支）
+## 最终架构
 
 ```
 MC JVM（纯 OpenJDK，加载不到 android.*）
@@ -59,10 +66,25 @@ MC JVM（纯 OpenJDK，加载不到 android.*）
               └── libmcef.so      ← 打进启动器 APK 的 lib/arm64-v8a/
                     └── IPC  socket 127.0.0.1:39090
                           └── 启动器 .cefhost 进程
-                                （ART + Cefrium + libcef）
+                                （ART + Cefrium 0.17.1 + libcef）
 ```
 
 **Cefrium 只跑在启动器进程里，MC 侧完全不接触它。**
+
+帧驱动链（2.3.x）：
+
+```
+MCEFMod @ RenderTickEvent.START
+  └── MCEFRenderer.beginMinecraftFrame()   // 只 ++ 帧号，不碰 JNI/GL
+        └── WebDisplays → getTextureID()
+              └── claimPumpForFrame(帧号)  // 同一 MC 帧只放行一次
+                    └── tick()
+                          ├── peekTextureID()      // 不触发 pump，防自递归
+                          ├── dispatchPendingQueries()
+                          ├── getFrameInfo()       // version<=0 或没变就返回
+                          ├── copyFrame()
+                          └── onPaint()            // R/B 交换 + glTexImage2D
+```
 
 ---
 
@@ -86,16 +108,8 @@ WebDisplays 2.0.2 的结果：**22 个类引用、42 个成员引用**。多写�
 `Java_net_ccbluex_liquidbounce_mcef_nativebridge_McefNative_init` ——
 **包名被编译进符号名**，换个包名就 `UnsatisfiedLinkError`。
 
-改成 `JNI_OnLoad` + `RegisterNatives`：
-
-```cpp
-const char* const kTargetClasses[] = {
-    "net/ccbluex/liquidbounce/mcef/nativebridge/McefNative",   // MC 26.1.2 侧
-    "com/cinemamod/mcef/nativebridge/McefNative",              // 本项目
-};
-```
-
-加新包名只需往列表加一行，不新增导出符号。
+改成 `JNI_OnLoad` + `RegisterNatives`，`kTargetClasses` 里同时登记 LiquidBounce 与
+本项目两个类路径。加新包名只需往列表加一行，不新增导出符号。
 
 ### 3. 帧上传由 `getTextureID()` 驱动，不是 RenderTickEvent
 
@@ -107,14 +121,32 @@ MC 可能还在切 FBO、用别的 texture unit，此时 `glTexImage2D` 在 Mobi
 会立刻 `_setShaderTexture(0, texId)` 采样 —— **那一刻 GL 正处于「准备画这张纹理」
 的完整状态**，最安全。
 
+配套的限流有三道闸，缺一不可：
+
+- `peekTextureID()` 供 `tick()` 内部检查纹理是否创建，不触发 pump；
+  否则就是 `getTextureID → beforeUse → tick → getTextureID` 自递归
+  （实测 `-Xss2040k` 下 6.2 万层、`-Xss512k` 下 7331 层）。
+- `MCEFBrowser.pumping`（`AtomicBoolean`）兜底防重入。
+- `claimPumpForFrame()` 按 `RenderTickEvent.START` 递增的帧号去重；
+  不去重则 WebDisplays 每个屏幕面、每个渲染 pass 都会触发一次
+  `getFrameInfo`（实测过 **62258 次/帧**）。
+
+`version <= 0` 是 native 初始化时的全透明占位帧，不复制、不上传；
+`lastVersion` 只在 GL 上传成功后推进，失败时下一帧允许重试。
+
 ### 4. 纹理格式用 `GL_BGRA + GL_UNSIGNED_INT_8_8_8_8_REV`，但 CPU 侧要换 R/B
 
-`GL_RGBA + GL_UNSIGNED_BYTE`（GLES 原生组合）在 MobileGlues / gl4es 上会崩在
-驱动内部 memcpy（`R2 = 1280*4`，正好一行；源地址有效，崩的是驱动内部拷贝目标）。
+三种组合的实测结果：
 
-而 `GL_BGRA` 这条路径上驱动**并没有按 BGRA 语义处理**，而是当 RGBA 读了 ——
-所以颜色是反的。解法：CPU 侧先把字节换成 `[R][G][B][A]`，让「按 RGBA 读」的结果
-正好正确，同时保留 `GL_BGRA` 格式参数走不崩的那条路。
+| 组合 | 结果 |
+|---|---|
+| `GL_RGBA + GL_UNSIGNED_BYTE` | gl4es 崩在 `__memcpy_aarch64_simd` |
+| `GL_BGRA + REV`，不交换 | 不崩，但画面红蓝反转 |
+| `GL_BGRA + REV`，先交换 | **正确（本实现）** |
+
+`GL_BGRA` 这条路径上驱动并没有按 BGRA 语义处理，而是当 RGBA 读了。解法：CPU 侧
+先把字节换成 `[R][G][B][A]`，让「按 RGBA 读」的结果正好正确，同时保留 `GL_BGRA`
+格式参数走不崩的那条路。
 
 ### 5. so 放 APK 里，不塞 jar
 
@@ -122,85 +154,47 @@ Android 上 `/data/local/tmp` 之类临时目录常挂 `noexec`，从 jar 解压
 `System.load` 会失败。启动器把 `libmcef.so` 打进 APK 的 `lib/arm64-v8a/`，
 `System.loadLibrary("mcef")` 即可 —— 权限和 SELinux 上下文都是对的。
 
+**当前代码里 jar 不带 so**（2.3.0 起删掉解压回退与 `-PwithNative`）。这样可避免
+mod 版本与启动器 so 版本错配 —— JNI 是动态注册，错配只报 `UnsatisfiedLinkError`，
+看不出是版本问题。
+
+### 6. resize 只转发，不在本地伪造帧
+
+Cefrium ≥0.15.0 提供 `CefriumBrowser.setSize()`。native 侧只发 `{"cmd":"resize"}`
+给 host，**不动已发布的帧快照、不改本地宽高**。若在本地先换成一张新尺寸的全透明帧
+并 `frame_version++`，客户端会把这张白帧上传，而页面静止时 CEF 不再回调
+`OnPaint`，白屏会一直留着。
+
 ---
 
 ## 已知限制
 
 | 功能 | 状态 | 原因 |
 |---|---|---|
-| **投屏（MediaRouter）** | ⚠️ 需 stub | Cefrium 0.11.0 把 `androidx.mediarouter` 声明为 Maven 依赖；用本地 AAR 文件依赖时该依赖丢失，播放视频会因 `NoClassDefFoundError` 崩溃。需补 10 个 stub 类 |
-| **视频画面** | ❌ 有声音无画面 | OSR 模式下硬件解码的视频帧走 GPU overlay 路径，`OnPaint` 拿不到。已尝试 `disable-accelerated-video-decode`，仍未解决 |
-| **`resize`** | ✅ 支持 | Cefrium ≥0.15.0 有 `setSize()`，native 转发 `{"cmd":"resize"}`。新尺寸的帧由 host 推回，本地不伪造 —— 伪造会导致「白屏且不再重绘」 |
-| **键盘输入** | ❌ 未接 | 链路本身是通的（`sendKeyPress/Release/Typed` → `McefNative.sendInput` → IPC），host 侧 `handleInput` 的 `type=4/5/6` 仍走拒绝分支。Cefrium 0.18.0 已有 `sendKeyEvent(int,int,int,int,char)`，接上即可 |
+| **`resize`** | ✅ 支持（Cefrium ≥0.15.0） | native 转发命令，host 调 `setSize()`，新尺寸帧由 host 推回 |
+| **鼠标输入** | ✅ 通 | move/down/up/wheel 直连 `CefriumBrowser` 鼠标 API；坐标是 OSR 画布像素 |
+| **`cefQuery` / `sendQuery`** | ✅ 已通（2.3.0） | 页面 → host → native 队列 → `CefQueryCallbackHandler` → `queryReply` → 页面 |
+| **键盘输入** | ❌ 不支持 | `CefriumBrowser` 没有键盘 API。`sendKey*` 会发出去，host 记录「后端不支持」后丢弃 |
+| **标题回调** | ❌ `getTitle()` 恒空串 | IPC 桥没有取标题的通道 |
+| **光标监听** | ❌ 不会触发 | 两侧都没有 cursor 命令，Cefrium 也没暴露回调 |
+| **资源拦截** | ⚠️ 只能放行/拦截 | 桥只给 URL，不能改写响应体 |
+| **子 frame** | ⚠️ 只支持主 frame | OSR 未区分 frame |
+| **页面视频** | ⚠️ 取决于 Cefrium 版本 | 0.15.0 修了 OSR 视频不显示与全屏崩溃（[cef-android#16](https://codeberg.org/cefrium/cef-android/issues/16)）；0.11.0 及更早仍是有声音无画面 |
+| **投屏（MediaRouter）** | ⚠️ 需 host 侧依赖 | 用本地 AAR 依赖时 `androidx.mediarouter` 会丢失；host 侧已接媒体自动播放开关 |
 
-`libcef.so` 本身**带** H.264 / AAC（`H264Decoder` / `avc1` / `mp4a` 符号都在），
-所以视频问题不是编解码器缺失。
-
-### 鼠标坐标：不用换算，但画布不能小于屏幕分辨率
-
-WebDisplays 传给 `sendMouseMove/Press/Release/Wheel` 的坐标，就是它给该方块屏幕
-设定的分辨率（`ScreenData.resolution`），原样透传，自己不做缩放。所以上层
-**不需要**按方块尺寸再换算一次。
-
-要保证的是反过来的方向：**CEF 画布不能小于屏幕分辨率**。画布曾经是 1280×720，
-而屏幕按 `max_resolution_x/y`（默认 1920×1080）算出的坐标能到 x=1536 / y=894，
-越界后 CEF 直接丢弃整个事件 —— 表现为屏幕右侧和下半部分完全点不动。
-画布提到 1920×1080 覆盖上限后恢复正常，边界值只做 clamp 兜底。
+`libcef.so` 本身带 H.264 / AAC（`H264Decoder` / `avc1` / `mp4a` 符号都在），
+所以视频问题不是编解码器缺失，而是 OSR 下硬解走 GPU overlay 路径。
 
 ---
 
-## 一个踩过的坑：怎么测量决定了你能看见什么
+## 构建与发布
 
-`cefrium#18` 报过一次「`addDocumentStartJavaScript` 注册成功但从不执行」，
-结论是**错的** —— API 一直是好的，错的是测量方法。记录在这里，因为同类错误很容易重犯。
-
-当时的做法：同一个脚本走两条路径注入（document-start 和
-`evaluateJavaScript` 兜底），靠末尾一行 `alert()` 观察哪条执行了。
-
-脚本开头有幂等守卫：
-
-```js
-if (Object.prototype.hasOwnProperty.call(window, '__mcefDesktopSpoof')) return;
-```
-
-于是**先跑的路径赢了，后跑的静默 return，末尾的 `alert()` 永远到不了。**
-每次导航只看到一个 `alert`，我据此断言「只有兜底跑了」。
-
-但「document-start 先跑、兜底被守卫拦掉」和「document-start 没跑、兜底跑了」
-产生**完全相同**的观测结果 —— 一次 `alert`。我没把这种歧义当成疑点，而是直接
-选了一个解释。
-
-最小复测工程（探针不含守卫）两条都出现，而且 `DOCSTART` 早于 `FALLBACK`：
-
-```
-PROBE  DOCSTART  type=0 message=[DOCSTART]
-PROBE  FALLBACK  type=0 message=[FALLBACK]
-```
-
-### 由此得出的两条规则
-
-**1. 观测代码必须早于任何提前返回。** 探针要是第一条语句：
-
-```js
-alert('PROBE src=docstart');                    // 先观测
-if (window.__mcefDesktopSpoof) return;          // 再决定要不要干活
-```
-
-**2. 两条路径必须能区分来源。** 现在兜底注入前先写
-`window.__MCEF_INJECT_SRC__='fallback'`，脚本头部据此选择告警文本，
-日志里直接是 `PROBE src=docstart` 或 `PROBE src=fallback`。
-
-另外，兜底不再无条件注入 —— 先回读 `window.__mcefSpoofSrc`，
-document-start 已生效就跳过：
-
-```
-create desktop spoof js id=1 size=4790
-JSDIAG ... msg=PROBE src=docstart
-fallback skipped id=1 (document-start already applied)
-```
-
-**判断一个 API「不工作」之前，先确认你的观测手段在该 API 工作与否时会产生不同结果。**
-这次的观测手段不能。
+- `1.20.1`：`./gradlew build`（ForgeGradle 6 + Maven 解析 MC/Forge/LWJGL，
+  JDK 17+，输出 Java 17 字节码）。`libs/` 是可选的本地覆盖入口，不存在也不报错。
+- `libmcef-source`：CMake 3.22+ / NDK / `arm64-v8a` / `android-24`，产物约 122 KB。
+- `launcher-integration`：Zalith Launcher 的 **source overlay**，需按 README 里给的
+  基线 commit 覆盖到对应工程树，不是独立 Android 项目。
+- 预编译产物见 [Releases](../../releases)。
 
 ---
 
@@ -209,6 +203,7 @@ fallback skipped id=1 (document-start already applied)
 - 本仓库代码：见 [LICENSE](LICENSE)（GPL-3.0）
 - JCEF 的 API 形状来自 Chromium/CEF（BSD）
 - 上游 [CinemaMod MCEF](https://github.com/CinemaMod/mcef) 为 LGPL-2.1
+- `launcher-integration` 分支的 Zalith Launcher 源码：GPL-3.0，保留原版权声明
 
 `org.cef.*` 是**按 JCEF 的公开 API 重新写的实现**，不是拷贝；
 `com.cinemamod.mcef.*` 保持同名同签名以兼容消费方，实现为全新编写。
