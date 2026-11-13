@@ -1,0 +1,17 @@
+# 构建产物
+build/
+app/build/
+buildSrc/build/
+.gradle/
+buildSrc/.gradle/
+local.properties
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+
+# 手工放置的引擎 so（由 cefrium-sdk AAR 自动提供，不入库）
+# libmcef.so 例外：它是本仓库编译产物，需要入库
+app/src/main/jniLibs/arm64-v8a/libcef.so
+.kotlin/
