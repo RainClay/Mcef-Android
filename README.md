@@ -21,10 +21,11 @@
 | `main` | 项目总览与架构说明（本分支） | — |
 | [`1.20.1`](../../tree/1.20.1) | MC 1.20.1 Forge 侧的 `org.cef.*` / `com.cinemamod.mcef.*` 兼容层 | **实机验证可用**，最完整 |
 | [`libmcef-source`](../../tree/libmcef-source) | `libmcef.so` 的 C++/JNI 源码（CMake + NDK） | 可构建 |
-| [`launcher-integration`](../../tree/launcher-integration) | Zalith Launcher 侧的 `.cefhost` 集成源码（overlay，非独立工程） | 可集成 |
+| [`host-plugin`](../../tree/host-plugin) | 独立的引擎插件 APK：Cefrium + host 服务 + `libcef.so`，经 NativeLibPlugin 协议接入 | **实机验证可用**，启动器保持上游原版 |
 | [`26.1.2`](../../tree/26.1.2) | 直连 Cefrium 的早期探索版 | 接口不全，**不能用于 MC** |
 
-四个实现分支各有独立 README；`1.20.1` 那份最详细（架构、帧驱动、踩坑记录、能力边界）。
+四个实现分支各有独立 README；`1.20.1` 那份最详细（架构、帧驱动、踩坑记录、能力边界），
+`host-plugin` 那份写清了打包与隔离子进程的约束。
 
 ---
 
@@ -65,7 +66,7 @@ MC JVM（纯 OpenJDK，加载不到 android.*）
         └── McefNative（JNI）
               └── libmcef.so      ← 打进启动器 APK 的 lib/arm64-v8a/
                     └── IPC  socket 127.0.0.1:39090
-                          └── 启动器 .cefhost 进程
+                          └── host 进程（引擎插件内）
                                 （ART + Cefrium 0.18.0 + libcef）
 ```
 
