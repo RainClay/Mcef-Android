@@ -70,7 +70,9 @@ MC JVM（纯 OpenJDK，加载不到 android.*）
                                 （ART + Cefrium 0.18.0 + libcef）
 ```
 
-**Cefrium 只跑在启动器进程里，MC 侧完全不接触它。**
+**Cefrium 只跑在 host 进程里，MC 侧完全不接触它。**
+
+host 现在住在独立的引擎插件 APK 里（`host-plugin` 分支），启动器保持上游原版。
 
 帧驱动链（2.3.x）：
 
@@ -86,6 +88,9 @@ MCEFMod @ RenderTickEvent.START
                           ├── copyFrame()
                           └── onPaint()            // R/B 交换 + glTexImage2D
 ```
+
+host 现在住在独立的引擎插件里（仓库的 `host-plugin` 分支），
+启动器保持上游原版 —— 见该分支 README。
 
 ---
 
