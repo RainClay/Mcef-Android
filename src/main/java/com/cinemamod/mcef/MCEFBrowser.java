@@ -822,11 +822,20 @@ public class MCEFBrowser extends CefBrowserOsr {
                 0, 0, 0, modifiers, 0, amount, 0);
     }
 
+    /**
+     * 按下键。
+     *
+     * <p>{@code keyCode} 是 GLFW 键码（Minecraft 在 Android 上仍用桌面键码），
+     * host 侧再转成 Android KeyEvent 键码 —— 见 {@link GlfwToAndroidKey}。
+     * 未收录的键不发，避免页面上出现一堆无意义的 keydown。</p>
+     */
     public void sendKeyPress(int keyCode, long scanCode, int modifiers) {
+        if (GlfwToAndroidKey.map(keyCode) == 0) return;
         sendInput(McefNative.INPUT_KEY_DOWN, 0, 0, 0, keyCode, (int) scanCode, modifiers, 0, 0, 0);
     }
 
     public void sendKeyRelease(int keyCode, long scanCode, int modifiers) {
+        if (GlfwToAndroidKey.map(keyCode) == 0) return;
         sendInput(McefNative.INPUT_KEY_UP, 0, 0, 0, keyCode, (int) scanCode, modifiers, 0, 0, 0);
     }
 
