@@ -66,7 +66,7 @@ MC JVM（纯 OpenJDK，加载不到 android.*）
               └── libmcef.so      ← 打进启动器 APK 的 lib/arm64-v8a/
                     └── IPC  socket 127.0.0.1:39090
                           └── 启动器 .cefhost 进程
-                                （ART + Cefrium 0.17.1 + libcef）
+                                （ART + Cefrium 0.18.0 + libcef）
 ```
 
 **Cefrium 只跑在启动器进程里，MC 侧完全不接触它。**
@@ -165,6 +165,11 @@ Cefrium ≥0.15.0 提供 `CefriumBrowser.setSize()`。native 侧只发 `{"cmd":"
 并 `frame_version++`，客户端会把这张白帧上传，而页面静止时 CEF 不再回调
 `OnPaint`，白屏会一直留着。
 
+另有一处容易踩的语义重叠：`MCEFBrowser.resize()` 在 WebDisplays 语境下
+**不是改画布尺寸**，而是记录「屏幕的逻辑分辨率」（WD 的 `hit2pixels` 按
+`方块尺寸 * 16 - 4 再 * 8` 算，1×1 屏幕是 96×96）。画布保持 1920×1080，
+鼠标坐标按分辨率换算。真正改画布的入口是 `setCanvasSize()`。
+
 ---
 
 ## 已知限制
@@ -172,9 +177,11 @@ Cefrium ≥0.15.0 提供 `CefriumBrowser.setSize()`。native 侧只发 `{"cmd":"
 | 功能 | 状态 | 原因 |
 |---|---|---|
 | **`resize`** | ✅ 支持（Cefrium ≥0.15.0） | native 转发命令，host 调 `setSize()`，新尺寸帧由 host 推回 |
-| **鼠标输入** | ✅ 通 | move/down/up/wheel 直连 `CefriumBrowser` 鼠标 API；坐标是 OSR 画布像素 |
+| **鼠标输入** | ✅ 通 | move/down/up/wheel 直连 `CefriumBrowser` 鼠标 API；坐标是屏幕逻辑分辨率，由 `clampX/clampY` 换算到画布 |
 | **`cefQuery` / `sendQuery`** | ✅ 已通（2.3.0） | 页面 → host → native 队列 → `CefQueryCallbackHandler` → `queryReply` → 页面 |
-| **键盘输入** | ❌ 不支持 | `CefriumBrowser` 没有键盘 API。`sendKey*` 会发出去，host 记录「后端不支持」后丢弃 |
+| **键盘输入** | ✅ 支持（Cefrium ≥0.18.0） | 字符走 `imeCommitText`，按键走 `sendKeyEvent(android.view.KeyEvent)`（内部做 Android→Windows 映射并发 RAWKEYDOWN/CHAR/KEYUP）。GLFW 键码由 `GlfwToAndroidKey` 换算。**五参 `sendKeyEvent` 要的是 Windows 虚拟键码，别用** |
+| **暂停保护** | ✅ | 暂停时 `getTextureID()`/`tick()` 提前返回 —— 半冻结的 GL 上下文里 `glTexImage2D` 会在 MobileGlues 崩 |
+| **GL 状态卫生** | ✅ | 尺寸不变走 `glTexSubImage2D`；上传前后隔离 `GL_UNPACK_*`，避免被别的 mod 污染后按错误步长读 |
 | **标题回调** | ❌ `getTitle()` 恒空串 | IPC 桥没有取标题的通道 |
 | **光标监听** | ❌ 不会触发 | 两侧都没有 cursor 命令，Cefrium 也没暴露回调 |
 | **资源拦截** | ⚠️ 只能放行/拦截 | 桥只给 URL，不能改写响应体 |
