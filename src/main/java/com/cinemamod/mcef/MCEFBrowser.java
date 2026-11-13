@@ -78,8 +78,25 @@ public class MCEFBrowser extends CefBrowserOsr {
 
     private static final Logger LOGGER = LogManager.getLogger("MCEF/Browser");
 
-    private static final int DEFAULT_WIDTH = 1280;
-    private static final int DEFAULT_HEIGHT = 720;
+    /**
+     * 画布默认尺寸。
+     *
+     * 必须覆盖 WebDisplays 允许的最大屏幕分辨率，否则鼠标坐标会越界。
+     * WebDisplays 给方块屏幕算出的坐标用的是该屏幕自己设的分辨率
+     * （ScreenData.resolution），上限由 common 配置的
+     * max_resolution_x / max_resolution_y 决定，默认 1920x1080。
+     * 它把这些坐标原样交给 sendMouse*，不做任何缩放。
+     *
+     * 以前这里是 1280x720：屏幕按 1920x1080 算出的坐标一旦超过 1280 或 720，
+     * CEF 直接丢弃整个事件，表现为屏幕右侧和下半部分完全点不动。
+     * 早年画布是 512x512、屏幕分辨率也低，两者量级接近，所以那时是好的。
+     *
+     * 取上限而不是让画布跟随每块屏幕：MCEFBrowser 在 WebDisplays 的构造链里
+     * 拿不到 ScreenData.resolution，而画布偏大只会让页面按更大的视口排版
+     * （正好也符合"按桌面版渲染"的目标），偏小则会丢输入。
+     */
+    private static final int DEFAULT_WIDTH = 1920;
+    private static final int DEFAULT_HEIGHT = 1080;
 
     private final MCEFClient client;
 
@@ -117,6 +134,9 @@ public class MCEFBrowser extends CefBrowserOsr {
 
     /** 单次 tick 最多分发多少条查询，防止页面刷屏把渲染线程拖住。 */
     private static final int MAX_QUERIES_PER_TICK = 8;
+
+    /** JS 查询不可用只警告一次，避免每帧刷屏。 */
+    private boolean queryUnsupportedLogged;
 
     /** 查询分发防重入：处理器可能同步回调，也可能自己触发新的查询。 */
     private final AtomicBoolean dispatchingQueries = new AtomicBoolean(false);
@@ -444,9 +464,29 @@ public class MCEFBrowser extends CefBrowserOsr {
         }
     }
 
+    /**
+     * 游戏是否处于暂停状态（单机暂停 / 多人暂停菜单）。
+     *
+     * <p>任何 Throwable 都当作"没暂停"：判断本身不能成为渲染中断的理由。</p>
+     */
+    private static boolean isGamePaused() {
+        try {
+            final net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
+            return mc != null && mc.isPaused();
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     public void tick() {
         if (handle <= 0 || !pumping.compareAndSet(false, true)) return;
         try {
+            // 游戏暂停时丢弃整帧任务：暂停期间 GL 上下文处于半冻结状态，
+            // 此时 glTexImage2D 上传会在驱动内部崩（libmobileglues memcpy）。
+            // renderer.getTextureID() 里也有同样的门，这里是第二道 ——
+            // 暂停时可能还有别的路径（如 query 回调）触发 tick。
+            if (isGamePaused()) return;
+
             if (renderer.peekTextureID() == 0) {
                 renderer.initialize();
                 if (renderer.peekTextureID() == 0) return;
@@ -454,7 +494,23 @@ public class MCEFBrowser extends CefBrowserOsr {
 
             // 查询分发必须放在帧版本门控之前：没有新帧时 version 不变会提前
             // return，查询就会一直压在 native 队列里等到下一次重绘才处理。
-            dispatchPendingQueries();
+            //
+            // 整段包 try/catch(Throwable)：libmcef.so 当前版本没有 takeQuery /
+            // replyQuery 的 native 实现（2.3.0 新增，C++ 侧未跟进），调用会抛
+            // UnsatisfiedLinkError。那是 Error 不是 Exception，会穿透 tick() 一路
+            // 炸到渲染线程 —— MC 侧随即关闭 IPC socket，host 有画面却发不出来，
+            // 表现为 paints 一直涨、frames 恒为 0、日志刷 "Socket closed"。
+            //
+            // 这里吞掉只影响 JS 查询（cefQuery）功能，帧链路不受牵连。
+            // 等 libmcef.so 补上实现后，这段 catch 可以退回精确捕获。
+            try {
+                dispatchPendingQueries();
+            } catch (Throwable t) {
+                if (!queryUnsupportedLogged) {
+                    queryUnsupportedLogged = true;
+                    LOGGER.warn("JS 查询暂不可用（libmcef.so 缺 native 实现），已跳过：{}", t.toString());
+                }
+            }
 
             final int[] info = McefNative.getFrameInfo(handle);
             if (info == null || info.length < 5 || info[0] != McefNative.OK) return;
@@ -646,28 +702,61 @@ public class MCEFBrowser extends CefBrowserOsr {
 
     // ── 输入：上游 MCEF 的签名（WebDisplays 直接调这些）────────────────────
     //
-    // 坐标是 OSR 画布像素（0..viewWidth / 0..viewHeight），不是方块尺寸也不是
-    // 屏幕坐标 —— 上层要自己按方块面尺寸换算。
+    // WebDisplays 传进来的坐标已经是它给该屏幕设定的分辨率坐标
+    // （ScreenData.resolution），量纲与 CEF 画布一致，不需要缩放。
+    // 它把这些坐标原样透传给 sendMouse*，自己不做换算。
     //
-    // 能力边界：鼠标 move/down/up/wheel 四个类型 host 侧有真实实现
-    // （CefriumBrowser 的 sendMouse* API）。键盘的 down/up/char 会发出去，
-    // 但 host 侧明确记录「后端不支持（CefriumBrowser 无键盘 API）」并丢弃。
-    // 保留这些方法是为了让消费方代码通过链接。
+    // 真正要保证的是「画布不小于屏幕分辨率」。画布曾经是 1280x720，而屏幕按
+    // 1920x1080 上限算出的坐标能到 x=1536 / y=894，越界后 CEF 直接丢弃整个
+    // 事件 —— 表现为屏幕右侧和下半部分完全点不动。现在 DEFAULT_WIDTH/HEIGHT
+    // 已提到 1920x1080 覆盖上限，这里的 clampX/clampY 只是最后一道保险。
+    //
+    // 能力边界：鼠标 move/down/up/wheel host 侧有真实实现（CefriumBrowser 的
+    // sendMouse* API）。键盘 down/up/char 会发出去，但 host 侧当前记录
+    // 「后端不支持」并丢弃（见 CefriumHostService 的 handleInput）。
+
+    /**
+     * 把坐标夹进画布范围。
+     *
+     * 这里不做缩放：WebDisplays 传进来的已经是它给该屏幕设定的分辨率坐标
+     * （setResolution 是按方块屏幕单独设的），量纲和 CEF 画布一致。
+     * 早先 512x512 画布时代点击正常，正是因为它原样透传就够用。
+     *
+     * 需要做的只有一件事：把偶尔越界的值夹住，避免 CEF 直接丢弃整个事件。
+     */
+    private int clampX(int x) {
+        final int w = viewWidth > 0 ? viewWidth : 1;
+        if (x < 0) return 0;
+        return x >= w ? w - 1 : x;
+    }
+
+    private int clampY(int y) {
+        final int h = viewHeight > 0 ? viewHeight : 1;
+        if (y < 0) return 0;
+        return y >= h ? h - 1 : y;
+    }
 
     public void sendMouseMove(int mouseX, int mouseY) {
-        sendInput(McefNative.INPUT_MOUSE_MOVE, mouseX, mouseY, 0, 0, 0, 0, 0, 0, 0);
+        sendInput(McefNative.INPUT_MOUSE_MOVE, clampX(mouseX), clampY(mouseY), 0, 0, 0, 0, 0, 0, 0);
     }
 
     public void sendMousePress(int mouseX, int mouseY, int button) {
-        sendInput(McefNative.INPUT_MOUSE_DOWN, mouseX, mouseY, button, 0, 0, 0, 0, 0, 0);
+        // 诊断：logic 是 WebDisplays 给的，canvas 是发给 CEF 的（只夹边界）。
+        // 两者相差过大说明越界被夹了，等于点在画布外。
+        LOGGER.info("mousePress logic=({},{}) canvas=({},{}) viewport={}x{}",
+                mouseX, mouseY, clampX(mouseX), clampY(mouseY), viewWidth, viewHeight);
+        sendInput(McefNative.INPUT_MOUSE_DOWN, clampX(mouseX), clampY(mouseY),
+                button, 0, 0, 0, 0, 0, 0);
     }
 
     public void sendMouseRelease(int mouseX, int mouseY, int button) {
-        sendInput(McefNative.INPUT_MOUSE_UP, mouseX, mouseY, button, 0, 0, 0, 0, 0, 0);
+        sendInput(McefNative.INPUT_MOUSE_UP, clampX(mouseX), clampY(mouseY),
+                button, 0, 0, 0, 0, 0, 0);
     }
 
     public void sendMouseWheel(int mouseX, int mouseY, double amount, int modifiers) {
-        sendInput(McefNative.INPUT_MOUSE_WHEEL, mouseX, mouseY, 0, 0, 0, modifiers, 0, amount, 0);
+        sendInput(McefNative.INPUT_MOUSE_WHEEL, clampX(mouseX), clampY(mouseY),
+                0, 0, 0, modifiers, 0, amount, 0);
     }
 
     public void sendKeyPress(int keyCode, long scanCode, int modifiers) {
@@ -726,8 +815,9 @@ public class MCEFBrowser extends CefBrowserOsr {
         final int rc = McefNative.sendInput(handle, type, x, y, button, keyCode, scanCode,
                 modifiers, deltaX, deltaY, codepoint);
         // ERR_UNSUPPORTED 是预期内的（例如键盘），不当错误刷屏。
+        // 之前用 debug，正式包的日志级别下根本看不到，导致“点了没反应”查不到原因。
         if (rc != McefNative.OK && rc != McefNative.ERR_UNSUPPORTED) {
-            LOGGER.debug("sendInput type={} rc={}", type, rc);
+            LOGGER.info("sendInput type={} rc={}", type, rc);
         }
     }
 }

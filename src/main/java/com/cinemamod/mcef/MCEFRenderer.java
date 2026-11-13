@@ -85,6 +85,8 @@ public class MCEFRenderer {
 
     private int texWidth;
     private int texHeight;
+    /** 纹理存储是否已分配过；close() 后要清回 false。 */
+    private boolean texAllocated;
 
     private volatile boolean painted = false;
 
@@ -146,6 +148,29 @@ public class MCEFRenderer {
 
         com.mojang.blaze3d.platform.GlStateManager._bindTexture(textureId[0]);
 
+        // 显式把 unpack 状态设成"紧凑"再上传，完了还原。
+        //
+        // MobileGlues 的 glTexImage2D 会按 GL_UNPACK_ROW_LENGTH / ALIGNMENT /
+        // SKIP_ROWS / SKIP_PIXELS 推算源数据的步长与跨度：
+        //   row_stride = widthalign(row_px * src_size, alignment)
+        //   span = start + (height-1)*row_stride + width*ss
+        // 我们的 buffer 是紧凑的 width*height*4。一旦别的 mod 或 MC 自己留下
+        // 非默认的 unpack 状态，驱动就按错误步长读，读到 buffer 末尾之外 ——
+        // 崩溃点正是 libmobileglues 的 memcpy（寄存器里出现 1080 这种
+        // 不是 1280*4 的拷贝长度）。
+        //
+        // 用完必须原样还原：MC 的 GUI 贴图上传依赖默认值，设了不还原会让
+        // 整个界面贴图错位。
+        final int prevRowLen = glGetInteger(GL_UNPACK_ROW_LENGTH);
+        final int prevAlignment = glGetInteger(GL_UNPACK_ALIGNMENT);
+        final int prevSkipRows = glGetInteger(GL_UNPACK_SKIP_ROWS);
+        final int prevSkipPixels = glGetInteger(GL_UNPACK_SKIP_PIXELS);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+        try {
+
         // 先交换 R/B，再走 GL_BGRA + REV 上传。三种组合的实测结果：
         //   GL_RGBA  + UNSIGNED_BYTE        → gl4es 崩在 __memcpy_aarch64_simd
         //   GL_BGRA  + REV，不交换          → 不崩，但画面红蓝反转
@@ -154,13 +179,32 @@ public class MCEFRenderer {
         swapRgbaInPlace(buffer, width * height);
         buffer.position(0);
 
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0,
-                GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, buffer);
-
-        if (width != texWidth || height != texHeight) {
+        // 尺寸没变时走 glTexSubImage2D：只更新像素，不重新分配纹理存储。
+        //
+        // 原来每帧都调 glTexImage2D（完整重新分配）。暂停菜单 ESC 进出后
+        // GL 上下文可能被动过（EgLSurface 重建、驱动内部状态失效），
+        // 此时再让驱动重新分配会让它按新尺寸重算内部行缓冲 ——
+        // 崩溃点正是 libmobileglues 里 glTexImage2D 的 memcpy
+        // （SIGSEGV，寄存器里 R2=1080 这类不整的拷贝长度）。
+        // 尺寸没变就用 SubImage，驱动只做纯数据拷贝，不碰分配逻辑。
+        final boolean resized = (width != texWidth || height != texHeight);
+        if (resized || texAllocated == false) {
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0,
+                    GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, buffer);
             texWidth = width;
             texHeight = height;
-            LOGGER.info("texture sized to {}x{}", width, height);
+            texAllocated = true;
+            LOGGER.info("texture allocated {}x{}", width, height);
+        } else {
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height,
+                    GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, buffer);
+        }
+        } finally {
+            // 必须还原：MC 的 GUI 贴图上传依赖默认值。
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, prevRowLen);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, prevAlignment);
+            glPixelStorei(GL_UNPACK_SKIP_ROWS, prevSkipRows);
+            glPixelStorei(GL_UNPACK_SKIP_PIXELS, prevSkipPixels);
         }
 
         com.mojang.blaze3d.platform.GlStateManager._bindTexture(0);
@@ -206,7 +250,7 @@ public class MCEFRenderer {
      */
     public int getTextureID() {
         final Runnable pump = beforeUse;
-        if (pump != null && claimPumpForFrame(minecraftFrameId)) {
+        if (pump != null && !isGamePaused() && claimPumpForFrame(minecraftFrameId)) {
             try {
                 pump.run();
             } catch (Throwable t) {
@@ -214,6 +258,28 @@ public class MCEFRenderer {
             }
         }
         return textureId[0];
+    }
+
+    /**
+     * 游戏暂停时不要 pump 帧。
+     *
+     * <p>暂停后 MC 不再正常推进渲染帧（单机是真正的暂停，多人是暂停菜单），
+     * 而 WebDisplays 仍可能在被冻结的渲染 pass 里反复调用 {@code getTextureID}。
+     * 此时 pump 会走到 {@code glTexImage2D} 上传纹理 —— 恰好在主线程停摆、
+     * GL 上下文处于半冻结状态时操作它，实测会崩（
+     * {@code libmobileglues} 里的 {@code __memcpy_aarch64_simd}）。</p>
+     *
+     * <p>暂停期间直接返回旧纹理：画面本来就冻着，不刷帧没有可见影响；
+     * 恢复后帧号变化会自然重新放行。</p>
+     */
+    private static boolean isGamePaused() {
+        try {
+            final net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
+            return mc != null && mc.isPaused();
+        } catch (Throwable t) {
+            // 拿不到就当作没暂停：不能因为诊断代码本身把渲染停掉。
+            return false;
+        }
     }
 
     /** 不触发 pump 的裸纹理 id。内部初始化检查专用 —— 见 {@link #getTextureID()} 的递归说明。 */
@@ -256,6 +322,7 @@ public class MCEFRenderer {
             textureId[0] = 0;
             texWidth = 0;
             texHeight = 0;
+            texAllocated = false;
             painted = false;
         }
     }
