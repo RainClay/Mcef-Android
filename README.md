@@ -56,8 +56,11 @@ public static CefriumBrowser CefriumBrowser.createWithSurface(android.app.Activi
 MC JVM（纯 OpenJDK，零 android 依赖）
   └── com.cinemamod.mcef.* → org.cef.* → McefNative(JNI)
         └── libmcef.so → IPC 127.0.0.1:39090
-              └── 启动器 .cefhost 进程（ART + Cefrium + libcef）
+              └── host 进程（ART + Cefrium + libcef）
 ```
+
+host 现在住在独立的引擎插件里（仓库的 `host-plugin` 分支），
+启动器保持上游原版 —— 见该分支 README。
 
 ---
 
@@ -94,7 +97,7 @@ find wd_extract -name "*.class" | xargs -I{} javap -p -c {} \
 |---|---|
 | **无法在 MC 里运行** | 直连 Cefrium，需要 ART 环境 |
 | **接口不全** | 相比 `1.20.1` 分支缺 `MCEFApp` / `MCEFInitListener` / `CefMessageRouter` / `CefSchemeHandlerFactory` 等 8 个类 |
-| **帧上传时机** | 用 `RenderTickEvent.START`，会在 MobileGlues 上段错误（`1.20.1` 分支已改为 `getTextureID()` 驱动） |
+| **帧上传时机** | 用 `RenderTickEvent.START`，会在 MobileGlues 上段错误。`1.20.1` 分支改为 `getTextureID()` 驱动，并补了暂停保护、`glTexSubImage2D`、`GL_UNPACK_*` 隔离 —— 见该分支 README 的「暂停与 GL 状态」一节 |
 
 ---
 
