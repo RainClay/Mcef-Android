@@ -150,11 +150,27 @@ RenderSystem._setShaderTexture(0, texId);
 输入：
 
 ```java
-browser.sendMouseMove(x, y);              // 坐标是 OSR 画布像素
+browser.setScreenResolution(res.x, res.y); // 先告知屏幕的逻辑分辨率
+browser.sendMouseMove(x, y);              // 坐标是 0..resolution，不是画布像素
 browser.sendMousePress(x, y, 0);          // button: 0=左 1=中 2=右
 browser.sendMouseRelease(x, y, 0);
 browser.sendMouseWheel(x, y, 0, -3);      // deltaX, deltaY
+
+browser.sendKeyPress(glfwKey, scanCode, modifiers);   // GLFW 键码
+browser.sendKeyRelease(glfwKey, scanCode, modifiers);
+browser.sendKeyTyped('a', 0);                          // 直接提交字符
 ```
+
+坐标为什么不是画布像素：WebDisplays 的 `ScreenBlock.hit2pixels()` 按
+`屏幕方块尺寸 * 16 - 4 再 * 8` 算出 resolution（1×1 屏幕是 96×96，
+2×1 是 224×96），命中点归一化后乘上它。画布默认 1920×1080，
+两边空间不一致，所以由 `clampX/clampY` 按 `screenResolution` 换算。
+`resize()` 在 WebDisplays 语境下只记录坐标空间，
+真要改画布尺寸用 `setCanvasSize()`。
+
+键盘键码也是两套：Minecraft 在 Android 上仍用 GLFW 键码
+（`GLFW_KEY_A = 65`），Cefrium 要 Android KeyEvent 键码
+（`KEYCODE_A = 29`）。`GlfwToAndroidKey` 负责换算，未收录的键直接跳过。
 
 导航与脚本：
 
@@ -250,7 +266,7 @@ const char* const kTargetClasses[] = {
 | 功能 | 状态 | 原因 |
 |---|---|---|
 | **`resize`** | ✅ 支持（Cefrium ≥0.15.0） | native 转发 `{"cmd":"resize"}`，host 调 `CefriumBrowser.setSize()`。新尺寸的帧由 host 推回，本地不伪造 —— 伪造会导致「白屏且不再重绘」 |
-| **键盘输入** | ❌ 不支持 | `CefriumBrowser` 没有键盘 API。`sendKey*` 会发出去，host 侧记录「后端不支持」后丢弃。鼠标（move/down/up/wheel）是通的 |
+| **键盘输入** | ✅ 支持（Cefrium ≥0.18.0） | 字符走 `imeCommitText`，按键走 `sendKeyEvent(android.view.KeyEvent)`。GLFW 键码由 `GlfwToAndroidKey` 换算。**不要用五参 `sendKeyEvent`** —— 它要的是 Windows 虚拟键码，传 Android 键码会让页面收到 `key='' code=''`，猜错参数位置还会让 native 崩 |
 | **标题回调** | ❌ `getTitle()` 恒空串 | IPC 桥没有取标题的通道 |
 | **`sendQuery`** | ✅ 已通 | 2.3.0 起与 `cefriumQuery` 是同一条链路的两端，见下节 |
 | **`CefQueryCallbackHandler`** | ✅ 会被调用 | 每帧从 native 队列取查询分发给处理器，结果经 `queryReply` 回 host |
@@ -259,7 +275,22 @@ const char* const kTargetClasses[] = {
 | **子 frame** | ⚠️ 只支持主 frame | OSR 未区分 frame |
 | **页面视频** | ⚠️ 取决于 Cefrium 版本 | 0.15.0 修了 OSR 视频不显示与全屏崩溃（[cef-android#16](https://codeberg.org/cefrium/cef-android/issues/16)）。0.11.0 及更早仍是有声音无画面 |
 
-鼠标输入的坐标是 **OSR 画布像素**，需要上层按屏幕方块尺寸换算。
+鼠标输入的坐标是 **屏幕逻辑分辨率**（`ScreenData.resolution`），
+由 `clampX/clampY` 换算到画布。分辨率未知时退回只夹边界。
+
+### 暂停与 GL 状态
+
+游戏暂停时 `getTextureID()` 与 `tick()` 都会提前返回 —— 暂停期间 GL 上下文
+处于半冻结状态，此时 `glTexImage2D` 会在 MobileGlues 里崩。
+
+纹理更新走两条路：尺寸没变用 `glTexSubImage2D`（只更新像素），
+尺寸变了才 `glTexImage2D`（重新分配）。每帧都重新分配会让驱动不断重算
+内部行缓冲，resume 后尤其脆弱。
+
+上传前还会把 `GL_UNPACK_*`（ROW_LENGTH / ALIGNMENT / SKIP_ROWS /
+SKIP_PIXELS）显式设为紧凑布局并在 `finally` 还原 —— MobileGlues 的
+`mg_upload_fix_t` 会按这些状态推算源数据步长，别的 mod 留下的非默认值
+会让它按错误步长读、越过 buffer 末尾。
 
 ### 查询链路
 
