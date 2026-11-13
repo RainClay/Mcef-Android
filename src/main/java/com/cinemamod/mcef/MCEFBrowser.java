@@ -582,17 +582,42 @@ public class MCEFBrowser extends CefBrowserOsr {
     // ── 尺寸 ───────────────────────────────────────────────────────────────
 
     @Override
+    /**
+     * WebDisplays 通过这个方法告知**屏幕的坐标空间**，不是画布尺寸。
+     *
+     * <p>WD 的 {@code ScreenBlock.hit2pixels()} 按
+     * {@code 屏幕方块尺寸 * 16 - 4 再 * 8} 算出 resolution
+     * （1x1 屏幕 → 96x96，2x1 → 224x96），命中点归一化后乘上它。
+     * 所以 {@code sendMouseMove/Press/Release} 收到的坐标范围是
+     * {@code 0..resolution}，跟画布像素无关。</p>
+     *
+     * <p>画布保持创建时的尺寸（默认 1920x1080，够清晰），
+     * 坐标由 {@link #clampX}/{@link #clampY} 换算。若把画布也压到 96x96，
+     * 网页会变成一张缩略图 —— 那是另一回事，且不可用。</p>
+     *
+     * <p>真要改画布尺寸请用 {@link #setCanvasSize}。</p>
+     */
     public void resize(int width, int height) {
-        viewWidth = Math.max(1, width);
-        viewHeight = Math.max(1, height);
+        screenResX = Math.max(0, width);
+        screenResY = Math.max(0, height);
+    }
+
+    /**
+     * 真正改变画布渲染尺寸（转发给 CEF）。
+     *
+     * <p>与 {@link #resize} 区分开：那个是 WD 的坐标空间语义。
+     * 当前 WD 不会调这个方法，保留给上层自用。</p>
+     */
+    public void setCanvasSize(int width, int height) {
+        final int w = Math.max(1, width);
+        final int h = Math.max(1, height);
+        if (w == viewWidth && h == viewHeight) return;
+        viewWidth = w;
+        viewHeight = h;
         if (handle > 0) {
-            // 会真的生效：Cefrium 0.15.0 起有 CefriumBrowser.setSize()，
-            // native 把命令转发给 host。新尺寸的帧由 host 那边 OnPaint 推回来，
-            // 这里不伪造任何本地帧 —— 否则会出现「白屏且不再重绘」。
-            //
-            // viewWidth/viewHeight 立即更新是为了让 getBounds() 跟上；
-            // 缓存里的帧尺寸要等新帧到达才会变（见 tick() 的版本门控）。
-            McefNative.resize(handle, viewWidth, viewHeight);
+            // Cefrium 0.15.0 起有 setSize()，native 转发给 host。
+            // 不本地伪造帧 —— 否则会「白屏且不再重绘」。
+            McefNative.resize(handle, w, h);
         }
     }
 
@@ -724,16 +749,54 @@ public class MCEFBrowser extends CefBrowserOsr {
      *
      * 需要做的只有一件事：把偶尔越界的值夹住，避免 CEF 直接丢弃整个事件。
      */
+    /**
+     * WebDisplays 的屏幕逻辑分辨率。
+     *
+     * <p>WD 的 {@code ScreenBlock.hit2pixels()} 按
+     * {@code 屏幕方块尺寸 * 16 - 4 再 * 8} 算出 resolution（1x1 屏幕是 96x96，
+     * 2x1 是 224x96），随后把命中点归一化后乘上它 —— 所以它交给
+     * {@code sendMouseMove/Press/Release} 的坐标范围是 0..resolution，
+     * **不是**画布像素。</p>
+     *
+     * <p>而浏览器画布是按 WebDisplays 配置的 max_resolution（默认 1920x1080）
+     * 创建的。不换算就等于把 96x96 的坐标当 1920x1080 用，
+     * 所有点击挤在左上角 —— 表现为"点了乱跑，根本点不到想点的东西"。</p>
+     *
+     * <p>由上层通过 {@link #setScreenResolution} 告知；为 0 表示未知，
+     * 此时退回只夹边界（保持旧行为）。</p>
+     */
+    private volatile int screenResX;
+    private volatile int screenResY;
+
+    /**
+     * 告诉 MCEF 这块屏幕的逻辑分辨率（WD 的 {@code ScreenData.resolution}）。
+     *
+     * <p>每次屏幕尺寸/升级变化都可能改它，重复调用无害。</p>
+     */
+    public void setScreenResolution(int width, int height) {
+        this.screenResX = Math.max(0, width);
+        this.screenResY = Math.max(0, height);
+    }
+
+    /** 屏幕坐标 → 画布坐标。分辨率未知时原样返回（仅夹边界）。 */
     private int clampX(int x) {
         final int w = viewWidth > 0 ? viewWidth : 1;
-        if (x < 0) return 0;
-        return x >= w ? w - 1 : x;
+        int v = x;
+        if (screenResX > 0 && screenResX != w) {
+            v = Math.round(x * (float) w / (float) screenResX);
+        }
+        if (v < 0) return 0;
+        return v >= w ? w - 1 : v;
     }
 
     private int clampY(int y) {
         final int h = viewHeight > 0 ? viewHeight : 1;
-        if (y < 0) return 0;
-        return y >= h ? h - 1 : y;
+        int v = y;
+        if (screenResY > 0 && screenResY != h) {
+            v = Math.round(y * (float) h / (float) screenResY);
+        }
+        if (v < 0) return 0;
+        return v >= h ? h - 1 : v;
     }
 
     public void sendMouseMove(int mouseX, int mouseY) {
