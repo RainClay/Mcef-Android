@@ -180,6 +180,9 @@ Cefrium ≥0.15.0 提供 `CefriumBrowser.setSize()`。native 侧只发 `{"cmd":"
 
 ## 已知限制
 
+> 下表是**本项目当前实现**的能力边界，不代表 Cefrium 的上限。
+> 标注「本项目未升级」的项，引擎侧已有对应 API，只是 host 还没接。
+
 | 功能 | 状态 | 原因 |
 |---|---|---|
 | **`resize`** | ✅ 支持（Cefrium ≥0.15.0） | native 转发命令，host 调 `setSize()`，新尺寸帧由 host 推回 |
@@ -188,10 +191,10 @@ Cefrium ≥0.15.0 提供 `CefriumBrowser.setSize()`。native 侧只发 `{"cmd":"
 | **键盘输入** | ✅ 支持（Cefrium ≥0.18.0） | 字符走 `imeCommitText`，按键走 `sendKeyEvent(android.view.KeyEvent)`（内部做 Android→Windows 映射并发 RAWKEYDOWN/CHAR/KEYUP）。GLFW 键码由 `GlfwToAndroidKey` 换算。**五参 `sendKeyEvent` 要的是 Windows 虚拟键码，别用** |
 | **暂停保护** | ✅ | 暂停时 `getTextureID()`/`tick()` 提前返回 —— 半冻结的 GL 上下文里 `glTexImage2D` 会在 MobileGlues 崩 |
 | **GL 状态卫生** | ✅ | 尺寸不变走 `glTexSubImage2D`；上传前后隔离 `GL_UNPACK_*`，避免被别的 mod 污染后按错误步长读 |
-| **标题回调** | ❌ `getTitle()` 恒空串 | IPC 桥没有取标题的通道 |
+| **标题回调** | ❌ `getTitle()` 恒空串 | IPC 桥没有取标题的通道。Cefrium 0.21.0 已提供 `getTitle()`，本项目未升级 |
 | **光标监听** | ❌ 不会触发 | 两侧都没有 cursor 命令，Cefrium 也没暴露回调 |
-| **资源拦截** | ⚠️ 只能放行/拦截 | 桥只给 URL，不能改写响应体 |
-| **子 frame** | ⚠️ 只支持主 frame | OSR 未区分 frame |
+| **资源拦截** | ⚠️ 只能放行/拦截 | 桥只给 URL，不能改写响应体。Cefrium 0.21.0 的 `CefriumResourceInterceptor` 可改写响应，本项目未升级 |
+| **子 frame** | ⚠️ 只支持主 frame | OSR 未区分 frame。Cefrium 0.19.0 起有 `PopupHandler.onCreateWindow`，本项目未接入 |
 | **页面视频** | ⚠️ 取决于 Cefrium 版本 | 0.15.0 修了 OSR 视频不显示与全屏崩溃（[cef-android#16](https://codeberg.org/cefrium/cef-android/issues/16)）；0.11.0 及更早仍是有声音无画面 |
 | **投屏（MediaRouter）** | ⚠️ 需 host 侧依赖 | 用本地 AAR 依赖时 `androidx.mediarouter` 会丢失；host 侧已接媒体自动播放开关 |
 
@@ -204,9 +207,9 @@ Cefrium ≥0.15.0 提供 `CefriumBrowser.setSize()`。native 侧只发 `{"cmd":"
 
 - `1.20.1`：`./gradlew build`（ForgeGradle 6 + Maven 解析 MC/Forge/LWJGL，
   JDK 17+，输出 Java 17 字节码）。`libs/` 是可选的本地覆盖入口，不存在也不报错。
-- `libmcef-source`：CMake 3.22+ / NDK / `arm64-v8a` / `android-24`，产物约 122 KB。
-- `launcher-integration`：Zalith Launcher 的 **source overlay**，需按 README 里给的
-  基线 commit 覆盖到对应工程树，不是独立 Android 项目。
+- `libmcef-source`：CMake 3.22+ / NDK / `arm64-v8a` / `android-24`，产物约 134 KB。
+- `host-plugin`：`./gradlew :app:assembleDebug`（AGP 9 + `buildSrc` 里的 `com.cefrium`
+  插件，产物约 153 MB）。`libcef.so` 由 `cefrium-sdk` AAR 自动带入，不入库。
 - 预编译产物见 [Releases](../../releases)。
 
 ---
@@ -216,7 +219,7 @@ Cefrium ≥0.15.0 提供 `CefriumBrowser.setSize()`。native 侧只发 `{"cmd":"
 - 本仓库代码：见 [LICENSE](LICENSE)（GPL-3.0）
 - JCEF 的 API 形状来自 Chromium/CEF（BSD）
 - 上游 [CinemaMod MCEF](https://github.com/CinemaMod/mcef) 为 LGPL-2.1
-- `launcher-integration` 分支的 Zalith Launcher 源码：GPL-3.0，保留原版权声明
+- Cefrium 二进制：**不分发**，构建时由 `cefrium-sdk` AAR 解析
 
 `org.cef.*` 是**按 JCEF 的公开 API 重新写的实现**，不是拷贝；
 `com.cinemamod.mcef.*` 保持同名同签名以兼容消费方，实现为全新编写。
