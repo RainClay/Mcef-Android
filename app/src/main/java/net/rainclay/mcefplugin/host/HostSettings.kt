@@ -34,6 +34,7 @@ object HostSettings {
     private const val PREF_NAME = "mcef_host_settings"
     private const val KEY_DESKTOP_UA = "desktop_user_agent"
     private const val KEY_MEDIA_GESTURE = "media_playback_without_gesture"
+    private const val KEY_AUTO_START = "auto_start_host"
 
     @Volatile
     private var prefs: SharedPreferences? = null
@@ -56,4 +57,18 @@ object HostSettings {
     var mediaPlaybackWithoutGesture: Boolean
         get() = p()?.getBoolean(KEY_MEDIA_GESTURE, true) ?: true
         set(value) { p()?.edit()?.putBoolean(KEY_MEDIA_GESTURE, value)?.apply() }
+
+    /**
+     * 打开 Minecraft 时自动拉起承载进程。默认开。
+     *
+     * <p>「打开 Minecraft」指的是**插件被拉起**这个时机 —— 启动器的
+     * NativeLibPlugin 会把插件的 Application 拉起来读 library 路径，
+     * 那一刻起一份前台服务就能常驻，MC 连上来时 host 已经就绪。</p>
+     *
+     * <p>为什么要这个开关：常驻前台服务会一直显示通知、占内存。
+     * 只偶尔玩一次的用户可以关掉，改成手动点「启动承载进程」。</p>
+     */
+    var autoStartHost: Boolean
+        get() = p()?.getBoolean(KEY_AUTO_START, true) ?: true
+        set(value) { p()?.edit()?.putBoolean(KEY_AUTO_START, value)?.apply() }
 }

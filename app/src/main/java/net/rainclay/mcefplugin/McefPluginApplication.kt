@@ -20,7 +20,11 @@ package net.rainclay.mcefplugin
 
 import android.app.Application
 import android.content.Context
+import android.content.Intent
+import android.os.Build
 import com.cefrium.Cefrium
+import net.rainclay.mcefplugin.host.CefriumHostService
+import net.rainclay.mcefplugin.host.HostSettings
 import org.chromium.base.ApplicationStatus
 
 /**
@@ -54,6 +58,9 @@ class McefPluginApplication : Application() {
             .getOrElse { runCatching { java.io.File("/proc/self/cmdline").readText().trimEnd('\u0000') }.getOrDefault("") }
 
         if (pn.endsWith(".cefhost")) {
+            // 自动启动：只在承载进程里做，否则设置页自己的启动会再拉一次。
+            maybeAutoStartHost()
+
             runCatching {
                 Cefrium.setupProcess(this)
                 CefriumHostLog.mirror(
@@ -66,6 +73,38 @@ class McefPluginApplication : Application() {
                 )
             }
         }
+    }
+}
+
+/**
+ * 按设置自动拉起承载进程。
+ *
+ * <p>时机：启动器的 NativeLibPlugin 会拉起本插件的 Application 来读
+ * library 路径，这一刻起服务就能常驻 —— MC 真正连上来时 host 已就绪，
+ * 不必等用户手动点。</p>
+ *
+ * <p>只针对承载进程判断：设置页进程也会走 onCreate，那里不该重复启动。
+ * 用 {@link HostSettings} 而不是读什么全局态 —— SharedPreferences
+ * 在同应用的多进程间最终一致，够用（toggle 后下一次启动生效）。</p>
+ */
+private fun Application.maybeAutoStartHost() {
+    runCatching {
+        HostSettings.init(this)
+        if (!HostSettings.autoStartHost) {
+            CefriumHostLog.mirror("autoStart: 已关闭，跳过")
+            return
+        }
+        val intent = Intent(this, CefriumHostService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+        CefriumHostLog.mirror("autoStart: 已拉起 CefriumHostService")
+    }.onFailure {
+        // 后台启动前台服务在部分 ROM 会受限（Android 12+ 的后台启动限制）。
+        // 失败就记一笔，用户仍可手动点「启动承载进程」。
+        CefriumHostLog.mirror("autoStart: 失败 ${it.javaClass.simpleName}: ${it.message}")
     }
 }
 

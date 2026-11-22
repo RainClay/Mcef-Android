@@ -101,6 +101,39 @@ class CefriumHostService : Service() {
         clients = if (clientWriter != null) 1 else 0,
     )
 
+    /**
+     * 把状态写成一行 JSON 落到磁盘。
+     *
+     * <p>为什么不用静态字段：host 跑在独立进程（{@code .cefhost}），
+     * 界面在另一个进程。JVM 内存不共享，UI 侧读到的一直是初始值 ——
+     * HUD 永远显示「未启动」。文件是唯一可靠的跨进程通道，
+     * 且不需要 Binder/AIDL。</p>
+     */
+    private fun writeSnapshotFile(snap: Snapshot) {
+        runCatching {
+            val json = org.json.JSONObject()
+                .put("running", snap.running)
+                .put("cefReady", snap.cefReady)
+                .put("browsers", snap.browsers)
+                .put("paints", snap.paints)
+                .put("framesSent", snap.framesSent)
+                .put("clients", snap.clients)
+                .put("updatedAt", System.currentTimeMillis())
+            val f = snapshotFile()
+            // 先写临时文件再 rename：UI 侧可能正好在读，
+            // 直接覆盖会读到半截 JSON。
+            val tmp = java.io.File(f.parentFile, f.name + ".tmp")
+            tmp.writeText(json.toString())
+            if (!tmp.renameTo(f)) {
+                f.writeText(json.toString())
+                tmp.delete()
+            }
+        }
+    }
+
+    private fun snapshotFile(): java.io.File =
+        java.io.File(getExternalFilesDir(null), "status.json")
+
     // 日志异步化：fileLog() 会被主线程、CEF 回调线程、IPC 线程、socket writer 高频调用，
     // 同步 appendText（每次 open/append/close 走外部存储）可能自己把调用线程卡住，
     // 从而干扰正在观测的卡顿。这里只入队，由单写线程落盘。
@@ -400,6 +433,8 @@ class CefriumHostService : Service() {
                     } catch (_: InterruptedException) {
                         break
                     }
+                    val snap = snapshot()
+                    writeSnapshotFile(snap)
                     publishSnapshot(this@CefriumHostService)
                     val paints = paintCount
                     val now = System.currentTimeMillis()
@@ -746,11 +781,79 @@ class CefriumHostService : Service() {
             clientWriter = writer
             clientOutput = s.getOutputStream()
 
-            while (running.get()) {
-                val line = reader.readLine() ?: break
-                if (line.isBlank()) continue
-                handleCommand(line, writer)
+            // ── 握手 ────────────────────────────────────────────────────────
+            //
+            // 39090 是本机回环端口，任何应用都能连进来。而协议里 input 能注入
+            // 事件、eval 能跑任意 JS、queryReply 能伪造查询结果 —— 不校验就等于
+            // 把浏览器控制权交给同机任意进程。
+            //
+            // 首包必须是 hello 且 token/版本都对，否则立刻断开。超时也断开：
+            // 否则一个只连接不说话的空闲 socket 会一直占着线程。
+            // 从 PackageManager 取版本而不是 BuildConfig：本工程没开 buildConfig，
+            // 生成类不可用；运行时读还能反映真实安装的版本。
+            val hostVersion = runCatching {
+                packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
+            }.getOrDefault("?")
+
+            val helloOk = try {
+                val first = readLineWithTimeout(s, reader, HANDSHAKE_TIMEOUT_MS)
+                if (first == null) {
+                    fileLog("handshake timeout remote=${socket.remoteSocketAddress}")
+                    false
+                } else {
+                    val hj = runCatching { JSONObject(first) }.getOrNull()
+                    when {
+                        hj == null || hj.optString("cmd") != "hello" -> {
+                            fileLog("handshake rejected: not hello remote=${socket.remoteSocketAddress}")
+                            false
+                        }
+                        hj.optString("token") != HANDSHAKE_TOKEN -> {
+                            fileLog("handshake rejected: bad token remote=${socket.remoteSocketAddress}")
+                            false
+                        }
+                        hj.optInt("protocol", -1) != PROTOCOL_VERSION -> {
+                            // 版本不符时把两边的值都记下来，便于判断是 mod 旧了还是插件旧了。
+                            fileLog(
+                                "handshake rejected: protocol ${hj.optInt("protocol", -1)} " +
+                                    "!= $PROTOCOL_VERSION (mod 与插件版本不匹配，需同时更新)"
+                            )
+                            false
+                        }
+                        else -> {
+                            fileLog(
+                                "handshake ok protocol=$PROTOCOL_VERSION " +
+                                    "mod=${hj.optString("modVersion", "?")} " +
+                                    "remote=${socket.remoteSocketAddress}"
+                            )
+                            // 回一个 hello，让 MC 侧知道自己也被接受了 ——
+                            // 它收到之前不会发 create，避免单方面以为连上了。
+                            runCatching {
+                                writer.write(
+                                    "{\"cmd\":\"hello\",\"protocol\":$PROTOCOL_VERSION," +
+                                        "\"hostVersion\":\"$hostVersion\"}\n"
+                                )
+                                writer.flush()
+                            }
+                            true
+                        }
+                    }
+                }
+            } catch (t: Throwable) {
+                fileLog("handshake error remote=${socket.remoteSocketAddress}", t)
+                false
             }
+
+            // 握手失败就不进命令循环：socket.use 结束时会关闭连接，
+            // 外层的 clientWriter/clientOutput 清理照常执行。
+            if (helloOk) {
+
+                while (running.get()) {
+                    val line = reader.readLine() ?: break
+                    if (line.isBlank()) continue
+                    handleCommand(line, writer)
+                }
+            }
+
         }
         if (clientSocket === socket) clientSocket = null
         // 必须无条件清空：写线程会一直读这两个引用，
@@ -758,6 +861,33 @@ class CefriumHostService : Service() {
         clientWriter = null
         clientOutput = null
         fileLog("client disconnected remote=${runCatching { socket.remoteSocketAddress }.getOrNull()}")
+    }
+
+    /**
+     * 带超时地读一行。
+     *
+     * <p>握手用：连接建立后对方可能永远不发数据，而 [BufferedReader.readLine]
+     * 会一直阻塞。用 [Socket.setSoTimeout] 让底层 read 抛
+     * {@code SocketTimeoutException}，再映射成 null。</p>
+     *
+     * <p>读完把超时恢复成 0（无限）—— 命令循环里是长连接，
+     * 不能沿用 3 秒超时，否则页面静止 3 秒就被判定掉线。</p>
+     */
+    private fun readLineWithTimeout(
+        socket: Socket,
+        reader: BufferedReader,
+        timeoutMs: Long,
+    ): String? {
+        return try {
+            socket.soTimeout = timeoutMs.toInt()
+            reader.readLine()
+        } catch (_: java.net.SocketTimeoutException) {
+            null
+        } catch (_: Throwable) {
+            null
+        } finally {
+            runCatching { socket.soTimeout = 0 }
+        }
     }
 
     private fun handleCommand(line: String, writer: BufferedWriter) {
@@ -1661,6 +1791,33 @@ class CefriumHostService : Service() {
         private const val HOST_ADDR = "127.0.0.1"
         private const val HOST_PORT = 39090
 
+        /**
+         * IPC 协议版本。
+         *
+         * MC 侧（libmcef.so）连上来时必须报同一个值，否则拒绝服务。
+         * 为什么需要：39090 是本机回环端口，任何应用都能连。而协议里
+         * `input` 能往页面注入事件、`eval` 能执行任意 JS、`queryReply`
+         * 能伪造查询结果 —— 不校验的话同机任意进程都能驱动浏览器。
+         *
+         * 改协议字段/语义时**必须**同步 bump：mod 与插件是分开发布的，
+         * 版本对不上时宁可拒绝连接，也好过按旧格式解析出新行为。
+         */
+        const val PROTOCOL_VERSION = 2
+
+        /**
+         * 握手令牌。
+         *
+         * 固定值，跟着协议版本一起用于 `hello` 校验。它不是密码学意义上的
+         * 机密（MC 侧和插件都是同一个作者分发的，静态值可被提取），
+         * 目的只是挡住"随手 nc 一下"和协议错配 —— 真正的防线是
+         * [PROTOCOL_VERSION] 与下面的首包强制校验：
+         * 连接建立后 3 秒内没发合法 `hello` 就断开。
+         */
+        const val HANDSHAKE_TOKEN = "mcef-ipc-v2"
+
+        /** 首包必须在此时限内到达，否则判定为无关进程，直接断开。 */
+        private const val HANDSHAKE_TIMEOUT_MS = 3_000L
+
         /** ready 回调的等待上限。超时即判定 Activity 起不来或回调被丢，必须显式记一笔。 */
         private const val READY_WATCHDOG_MS = 30_000L
 
@@ -1900,6 +2057,32 @@ class CefriumHostService : Service() {
         /** 日志文件路径；界面用它做日志预览。 */
         fun logFileFor(context: android.content.Context): File =
             File(context.getExternalFilesDir(null), "mcef-cefrium.log")
+
+        /** 状态文件路径；host 每 2 秒写一次，界面轮询它。 */
+        fun statusFileFor(context: android.content.Context): File =
+            File(context.getExternalFilesDir(null), "status.json")
+
+        /**
+         * 从磁盘读状态。
+         *
+         * <p>返回 null 表示 host 从没启动过；超过 10 秒没更新视为已停止
+         * （进程被杀时来不及清文件，不能只看 running 字段）。</p>
+         */
+        fun readSnapshot(context: android.content.Context): Snapshot? = runCatching {
+            val f = statusFileFor(context)
+            if (!f.isFile) return null
+            val o = org.json.JSONObject(f.readText())
+            val updatedAt = o.optLong("updatedAt", 0L)
+            val stale = System.currentTimeMillis() - updatedAt > 10_000L
+            Snapshot(
+                running = o.optBoolean("running", false) && !stale,
+                cefReady = o.optBoolean("cefReady", false) && !stale,
+                browsers = if (stale) 0 else o.optInt("browsers", 0),
+                paints = o.optLong("paints", 0L),
+                framesSent = o.optLong("framesSent", 0L),
+                clients = if (stale) 0 else o.optInt("clients", 0),
+            )
+        }.getOrNull()
 
         /** 由 Service 定期调用，把状态推给 UI。 */
         fun publishSnapshot(svc: CefriumHostService) {

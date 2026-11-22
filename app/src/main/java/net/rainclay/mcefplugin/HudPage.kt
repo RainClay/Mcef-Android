@@ -58,22 +58,24 @@ import top.yukonga.miuix.kmp.utils.scrollEndHaptic
  * HUD：引擎运行状态 + 日志预览。
  *
  * 数据来源两个：
- *   1. CefriumHostService.Companion.currentSnapshot —— 由心跳每 2 秒刷新，
- *      含 paints / frames / 浏览器数 / 连接数；
+ *   1. status.json —— host 每 2 秒写一次（paints / frames / 浏览器数 / 连接数）；
  *   2. 日志文件 —— 直接读最后 N 行，用于看最近发生了什么。
  *
- * 轮询而不是监听：host 跑在独立进程（net.rainclay.mcefplugin.cefhost），
- * 跨进程推送要 Binder；而这是诊断界面，2 秒粒度足够。
+ * 为什么走文件而不是静态字段：host 跑在独立进程
+ * （net.rainclay.mcefplugin.cefhost），JVM 内存不共享。早先用
+ * Companion.currentSnapshot 轮询，UI 侧读到的永远是初始值 ——
+ * 表现为「运行状态页一直显示初始文字」。文件是唯一可靠的跨进程通道，
+ * 且不需要 Binder。
  */
 @Composable
 fun HudPage(context: Context, onBack: () -> Unit) {
     val scrollBehavior = MiuixScrollBehavior()
-    var snapshot by remember { mutableStateOf(CefriumHostService.currentSnapshot) }
+    var snapshot by remember { mutableStateOf(CefriumHostService.readSnapshot(context)) }
     var logLines by remember { mutableStateOf<List<String>>(emptyList()) }
 
     LaunchedEffect(Unit) {
         while (true) {
-            snapshot = CefriumHostService.currentSnapshot
+            snapshot = CefriumHostService.readSnapshot(context)
             logLines = readLogTail(context, 40)
             delay(2000)
         }
@@ -135,7 +137,8 @@ fun HudPage(context: Context, onBack: () -> Unit) {
                     StatRow(
                         "状态",
                         when {
-                            s == null -> "无数据"
+                            s == null -> "承载进程未启动"
+                            !s.running -> "承载进程已停止"
                             s.framesSent > 0 -> "正常"
                             s.paints > 0 -> "有画面但未送达"
                             else -> "等待首帧"

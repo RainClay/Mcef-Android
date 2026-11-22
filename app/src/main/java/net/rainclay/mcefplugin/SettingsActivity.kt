@@ -83,6 +83,7 @@ private fun SettingsPage() {
     }
     var desktopUa by remember { mutableStateOf(HostSettings.desktopUserAgent) }
     var mediaGesture by remember { mutableStateOf(HostSettings.mediaPlaybackWithoutGesture) }
+    var autoStart by remember { mutableStateOf(HostSettings.autoStartHost) }
 
     val libDir = remember(context) {
         runCatching {
@@ -170,6 +171,18 @@ private fun SettingsPage() {
                         .padding(horizontal = 12.dp)
                         .padding(bottom = 12.dp),
                 ) {
+                    // 自动启动：启动器读插件库路径时会拉起本插件的 Application，
+                    // 那一刻起一份前台服务就能常驻 —— MC 连上来时 host 已就绪。
+                    SwitchPreference(
+                        title = "自动启动承载进程",
+                        summary = "打开 Minecraft 时自动拉起，不用每次手动点",
+                        checked = autoStart,
+                        onCheckedChange = {
+                            autoStart = it
+                            HostSettings.autoStartHost = it
+                        },
+                    )
+                    HorizontalDivider(Modifier.fillMaxWidth().padding(horizontal = 16.dp))
                     // 启动 host：点一下即可，前台服务保活。
                     // MC 侧 libmcef.so 连 127.0.0.1:39090，服务不在时浏览器起不来。
                     BasicComponent(
