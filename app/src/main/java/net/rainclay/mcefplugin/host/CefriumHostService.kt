@@ -19,7 +19,7 @@
 /*
  * MCEF Android/Cefrium host bridge.
  *
- * 作用：运行在 Zalith Android 进程内，提供 Android Context / Looper / Manifest
+ * 作用：运行在本插件的 .cefhost 进程内，提供 Android Context / Looper / Manifest
  * 环境，承接 libmcef.so 从 Minecraft 侧发来的 IPC 命令，并驱动 CefriumBrowser。
  */
 package net.rainclay.mcefplugin.host

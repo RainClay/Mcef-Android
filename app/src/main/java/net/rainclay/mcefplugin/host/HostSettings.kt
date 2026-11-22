@@ -24,10 +24,12 @@ import android.content.SharedPreferences
 /**
  * 插件本地设置。
  *
- * 从启动器的 AllSettings 抽出来 —— host 搬进插件后不能再依赖启动器代码，
- * 只保留 host 真正用到的两个开关。用 SharedPreferences 存，
- * 设置页（miuix）写、host 读，进程间靠 MODE_WORLD_READABLE 外的默认同步机制
- * （同 UID 同应用，SharedPreferences 直接可用）。
+ * <p>用 SharedPreferences 存：设置页（miuix）写、host 读。两者同 UID 同应用，
+ * 默认同步机制可用。</p>
+ *
+ * <p>历史注记：host 服务曾是启动器的一部分，那时配置取自启动器的
+ * AllSettings。搬进插件后这个依赖已完全去掉 —— 现在只保留 host 真正的
+ * 三项开关，全部由本类自管。别再去启动器里找配置来源。</p>
  */
 object HostSettings {
 
