@@ -30,17 +30,37 @@ Minecraft 内置浏览器（MCEF / WebDisplays）的**引擎插件**。
 ## 安装
 
 1. 装本插件（APK 见 Releases，或自行构建）
-2. 打开「MCEF 引擎」，点「启动承载进程」
+2. 装配套的 mod jar（`mcef-forge-*-android.jar`，见 1.20.1 分支的 Releases）
 3. 用原版 Zalith Launcher 2 启动 Minecraft，放置 WebDisplays 屏幕
 
-插件装好后**不用每次手动点** —— 前台服务保活，通知栏显示运行状态
-（待命 / 运行中 · N 个页面），点通知回到插件界面。
+**不需要手动启动承载进程。** 默认开启「自动启动承载进程」——
+启动器读插件库路径时会拉起本插件的 `Application`，那一刻起前台服务
+就常驻了，MC 连上来时 host 已就绪。
+
+想手动控制就在设置页关掉那个开关，之后每次点「启动承载进程」。
 
 ### 界面
 
 - **引擎**：Cefrium / Chromium 版本、`libcef.so` 与 `libmcef.so` 状态
 - **行为**：桌面化身份（伪装 Windows Chrome）、允许自动播放
+- **服务**：自动启动开关、运行状态入口、手动启动
 - **运行状态**：帧计数、MC 连接状态、最近 40 行日志
+
+### 运行状态页的数据怎么来的
+
+host 跑在 `.cefhost` 进程，界面在主进程 —— **两个 JVM，内存不共享**。
+所以状态不走 static 字段（那样 UI 永远读到初始值），而是 host 每 2 秒写
+`files/status.json`，界面轮询该文件。
+
+两个实现细节值得记住：
+
+- **写临时文件再 rename**：UI 可能正好在读，直接覆盖会读到截断的 JSON
+- **用 `updatedAt` 判活**：host 被系统杀掉时来不及把 `running` 改 false，
+  只认 10 秒内更新过的状态，否则界面会永远显示「运行中」
+
+状态行会区分：`承载进程未启动` / `承载进程已停止` / `等待首帧` /
+`有画面但未送达` / `正常`。最后两种的含义：`paints` 涨说明 CEF 在画，
+`framesSent` 涨说明帧送到了 MC。
 
 ---
 
@@ -86,10 +106,39 @@ if (processName != null && processName.contains(":")) return false;
 跟 MC 侧 `libmcef.so` 的 IPC 是**行分隔 JSON + 二进制帧**，监听
 `127.0.0.1:39090`。
 
+### 握手（必须先过这一关）
+
+`39090` 是本机回环端口，同机任何应用都能连。协议里 `input` 能注入事件、
+`eval` 能跑任意 JS、`queryReply` 能伪造结果 —— 不校验等于交出浏览器控制权。
+
+连接建立后首包必须是 hello，3 秒内不到或不匹配就断开：
+
+```
+{"cmd":"hello","protocol":2,"token":"mcef-ipc-v2"}
+```
+
+校验通过后 host 回：
+
+```
+{"cmd":"hello","protocol":2,"hostVersion":"<包版本>"}
+```
+
+| 校验点 | 不符时的日志 |
+|---|---|
+| `cmd == "hello"` | `handshake rejected: not hello` |
+| `token == "mcef-ipc-v2"` | `handshake rejected: bad token` |
+| `protocol == PROTOCOL_VERSION` | `handshake rejected: protocol N != 2 (mod 与插件版本不匹配，需同时更新)` |
+| 3 秒内收到首包 | `handshake timeout` |
+
+**改协议字段或语义时必须同步 bump `PROTOCOL_VERSION`**（以及 mod 侧
+`kProtocolVersion`）。mod 与插件分开发布，版本对不上时宁可拒绝连接。
+
+### 命令表
+
 | 方向 | 命令 |
 |---|---|
-| MC → host | `create` / `destroy` / `resize` / `loadUrl` / `eval` / `input` / `domSnapshot` / `queryReply` / `reload` … |
-| host → MC | `frame`（JSON 头 + payload）、`query`、`title`、`url` … |
+| MC → host | `hello` / `create` / `destroy` / `resize` / `loadUrl` / `eval` / `input` / `domSnapshot` / `queryReply` / `reload` … |
+| host → MC | `hello` / `frame`（JSON 头 + payload）、`query`、`title`、`url` … |
 
 输入事件 `type`：`0` MOVE / `1` DOWN / `2` UP / `3` WHEEL / `4` KEY_DOWN /
 `5` KEY_UP / `6` CHAR。
