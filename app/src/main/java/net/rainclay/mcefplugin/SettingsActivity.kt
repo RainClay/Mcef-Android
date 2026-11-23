@@ -84,6 +84,8 @@ private fun SettingsPage() {
     var desktopUa by remember { mutableStateOf(HostSettings.desktopUserAgent) }
     var mediaGesture by remember { mutableStateOf(HostSettings.mediaPlaybackWithoutGesture) }
     var autoStart by remember { mutableStateOf(HostSettings.autoStartHost) }
+    var logLevel by remember { mutableStateOf(HostSettings.logLevel) }
+    var showLevelDialog by remember { mutableStateOf(false) }
 
     val libDir = remember(context) {
         runCatching {
@@ -183,6 +185,16 @@ private fun SettingsPage() {
                         },
                     )
                     HorizontalDivider(Modifier.fillMaxWidth().padding(horizontal = 16.dp))
+                    BasicComponent(
+                        title = "日志级别",
+                        summary = when (logLevel) {
+                            HostSettings.LogLevel.ERRORS -> "仅错误（默认）"
+                            HostSettings.LogLevel.INFO -> "常规（含连接与生命周期）"
+                            HostSettings.LogLevel.VERBOSE -> "详细（含心跳与帧诊断）"
+                        },
+                        onClick = { showLevelDialog = true },
+                    )
+                    HorizontalDivider(Modifier.fillMaxWidth().padding(horizontal = 16.dp))
                     // 启动 host：点一下即可，前台服务保活。
                     // MC 侧 libmcef.so 连 127.0.0.1:39090，服务不在时浏览器起不来。
                     BasicComponent(
@@ -210,6 +222,41 @@ private fun SettingsPage() {
             }
 
             item { Spacer(Modifier.size(24.dp)) }
+        }
+    }
+
+    // 日志级别选择。用对话框而不是分段控件：三档且带解释文字，
+    // 对话框能放下每档的用途说明。
+    if (showLevelDialog) {
+        val options = listOf(
+            HostSettings.LogLevel.ERRORS to "仅错误（默认）—— 只写失败、异常、握手拒绝",
+            HostSettings.LogLevel.INFO to "常规 —— 加上生命周期、命令分发、握手成功",
+            HostSettings.LogLevel.VERBOSE to "详细 —— 再加上心跳与帧诊断（刷屏，只在排查时用）",
+        )
+        // miuix 的 DialogContent 是 internal，外部拿不到；用标准 Compose Dialog
+        // 套一层 miuix 的 Card，观感一致且不依赖非公开 API。
+        androidx.compose.ui.window.Dialog(
+            onDismissRequest = { showLevelDialog = false },
+        ) {
+            Card {
+                Text(
+                    text = "日志级别",
+                    style = MiuixTheme.textStyles.title4,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                )
+                HorizontalDivider(Modifier.fillMaxWidth().padding(horizontal = 16.dp))
+                options.forEach { (level, desc) ->
+                    BasicComponent(
+                        title = if (level == logLevel) "✓ ${level.name}" else level.name,
+                        summary = desc,
+                        onClick = {
+                            logLevel = level
+                            HostSettings.logLevel = level
+                            showLevelDialog = false
+                        },
+                    )
+                }
+            }
         }
     }
 }

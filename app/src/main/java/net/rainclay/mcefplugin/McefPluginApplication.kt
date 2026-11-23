@@ -51,29 +51,55 @@ class McefPluginApplication : Application() {
         super.onCreate()
         CefriumHostLog.currentAppContext = this
 
-        // 只在承载进程里预置 —— 子进程（renderer）走自己的初始化路径。
         // 进程名用点号形式（net.rainclay.mcefplugin.cefhost）：
         // Cefrium.initialize 遇到带冒号的进程名会直接 return false。
         val pn = runCatching { Application.getProcessName() }
-            .getOrElse { runCatching { java.io.File("/proc/self/cmdline").readText().trimEnd('\u0000') }.getOrDefault("") }
+            .getOrElse {
+                runCatching { java.io.File("/proc/self/cmdline").readText().trimEnd('\u0000') }
+                    .getOrDefault("")
+            }
 
         if (pn.endsWith(".cefhost")) {
-            // 自动启动：只在承载进程里做，否则设置页自己的启动会再拉一次。
+            setupCefriumProcess(pn)
+        } else {
+            // 主进程：按设置自动拉起承载进程。
+            //
+            // 必须放在主进程。放在 .cefhost 里会形成死循环：
+            // 服务启动才创建 .cefhost 进程，而 .cefhost 的 onCreate 才判断
+            // 要不要启动服务 —— 服务没起时那段代码永远不执行。
+            //
+            // 触发时机：用户打开插件的任何界面（设置页 / HUD）都会走到这里。
+            // 不能指望启动器 —— 它读插件库路径用 PackageManager，不拉进程。
             maybeAutoStartHost()
-
-            runCatching {
-                Cefrium.setupProcess(this)
-                CefriumHostLog.mirror(
-                    "McefPluginApplication: 已在 startHost 之前 setupProcess; " +
-                        "ApplicationStatus.isInitialized=${ApplicationStatus.isInitialized()}; proc=$pn"
-                )
-            }.onFailure {
-                CefriumHostLog.mirror(
-                    "McefPluginApplication: setupProcess 失败: ${it.javaClass.name}: ${it.message}"
-                )
-            }
         }
     }
+
+    /**
+     * 承载进程的初始化：预置 Chromium 的进程级状态。
+     *
+     * 反汇编 Cefrium/ApplicationStatus 确认：`ApplicationStatus` 的 Window.Callback
+     * 代理只在 Activity 进入 CREATED 时安装，而 onPause / onStop / onDestroy
+     * 都用一句断言校验"它装过"。没装就抛：
+     *
+     *     java.lang.AssertionError
+     *       at org.chromium.base.ApplicationStatus$2.onStateChanged(ApplicationStatus.java:342)
+     *
+     * 表现为 host Activity 每次 pause/stop 都 SWALLOWED 一条断言，CEF 状态机错乱。
+     *
+     * 用 SDK 自己的 `Cefrium.setupProcess()` 而不是手抄它内部那五项：
+     * 手抄踩过两次（顺序错、只做一半），setupProcess 是 public 且幂等的。
+     */
+    private fun setupCefriumProcess(pn: String) {
+        runCatching {
+            Cefrium.setupProcess(this)
+            CefriumHostLog.mirror(
+                "setupProcess ok; ApplicationStatus.isInitialized=${ApplicationStatus.isInitialized()}; proc=$pn"
+            )
+        }.onFailure {
+            CefriumHostLog.mirror("setupProcess 失败: ${it.javaClass.name}: ${it.message}")
+        }
+    }
+
 }
 
 /**
@@ -94,6 +120,13 @@ private fun Application.maybeAutoStartHost() {
             CefriumHostLog.mirror("autoStart: 已关闭，跳过")
             return
         }
+        // 已经在跑就别再发一次 startForegroundService —— 否则每次打开
+        // 设置页都会打一发 Intent，服务那边虽然幂等，但日志会被刷。
+        val alive = CefriumHostService.readSnapshot(this)?.running == true
+        if (alive) {
+            CefriumHostLog.mirror("autoStart: 已在运行，跳过")
+            return
+        }
         val intent = Intent(this, CefriumHostService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent)
@@ -102,9 +135,17 @@ private fun Application.maybeAutoStartHost() {
         }
         CefriumHostLog.mirror("autoStart: 已拉起 CefriumHostService")
     }.onFailure {
-        // 后台启动前台服务在部分 ROM 会受限（Android 12+ 的后台启动限制）。
-        // 失败就记一笔，用户仍可手动点「启动承载进程」。
-        CefriumHostLog.mirror("autoStart: 失败 ${it.javaClass.simpleName}: ${it.message}")
+        // Android 12+ 对后台启动前台服务有限制（BAL）。用户刚点开界面时
+        // 通常还在前台允许窗口内，但如果是从桌面图标冷启动、
+        // 或者 ROM 有自己的省电策略，仍可能抛 ForegroundServiceStartNotAllowedException。
+        // 这种情况只能记日志 + 让用户手动点 —— 前台点按钮一定允许。
+        val name = it.javaClass.simpleName
+        val hint = if (name.contains("ForegroundServiceStartNotAllowed")) {
+            "（系统限制后台启动前台服务，请手动点「启动承载进程」）"
+        } else {
+            ""
+        }
+        CefriumHostLog.mirror("autoStart: 失败 $name: ${it.message}$hint")
     }
 }
 

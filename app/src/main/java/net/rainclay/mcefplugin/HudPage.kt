@@ -75,8 +75,11 @@ fun HudPage(context: Context, onBack: () -> Unit) {
 
     LaunchedEffect(Unit) {
         while (true) {
-            snapshot = CefriumHostService.readSnapshot(context)
-            logLines = readLogTail(context, 40)
+            val snap = CefriumHostService.readSnapshot(context)
+            snapshot = snap
+            // host 没在跑时只看错误：那时 INFO/VERBOSE 早已停写，
+            // 存量里的心跳只会把故障行挤掉。
+            logLines = readLogTail(context, 40, onlyErrors = snap?.running != true)
             delay(2000)
         }
     }
@@ -105,6 +108,45 @@ fun HudPage(context: Context, onBack: () -> Unit) {
             overscrollEffect = null,
         ) {
             item { Spacer(Modifier.size(12.dp)) }
+
+            // 停机提示：把「只能看到错误行」这件事说明白，否则用户会以为
+            // 日志坏了 —— 而且会怀疑 FPS/帧率这类实时指标是不是也没了。
+            if (s == null || !s.running) {
+                item {
+                    Card(
+                        modifier = Modifier
+                            .padding(horizontal = 12.dp)
+                            .padding(bottom = 12.dp),
+                    ) {
+                        Text(
+                            text = if (s == null) {
+                                "承载进程还没启动过。启动后才能看到帧率、画面与连接状态。"
+                            } else {
+                                "承载进程已停止，日志只显示错误（E）行。"
+                            },
+                            style = MiuixTheme.textStyles.body2,
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                        )
+                        if (s != null) {
+                            HorizontalDivider(
+                                Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+                            )
+                            Text(
+                                text = "帧率、OnPaint、已发送帧这些计数是上次运行结束时" +
+                                    "保存的值，不会刷新。要看实时数据，请启动承载进程。",
+                                style = MiuixTheme.textStyles.footnote1,
+                                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                            )
+                        }
+                    }
+                }
+            }
 
             item { SmallTitle("引擎") }
             item {
@@ -189,8 +231,13 @@ private fun StatRow(title: String, value: String) {
     )
 }
 
-/** 读日志尾部 n 行；文件不存在返回空。 */
-private fun readLogTail(context: Context, n: Int): List<String> {
+/**
+ * 读日志尾部 n 行；文件不存在返回空。
+ *
+ * @param onlyErrors 只保留错误行。host 停止后 INFO/VERBOSE 两条通道已经不再
+ *   写入，存量里混着大量心跳会让真正的原因被淹掉 —— 此时只看 [E] 行。
+ */
+private fun readLogTail(context: Context, n: Int, onlyErrors: Boolean = false): List<String> {
     return runCatching {
         val f = CefriumHostService.logFileFor(context)
         if (!f.isFile) return emptyList()
@@ -205,9 +252,14 @@ private fun readLogTail(context: Context, n: Int): List<String> {
                 .lineSequence()
                 .filter { it.isNotBlank() }
                 .toList()
+                .let { lines ->
+                    if (onlyErrors) lines.filter { it.contains(" [E] ") } else lines
+                }
                 .takeLast(n)
-                // 去掉毫秒时间戳前缀，界面更干净
-                .map { line -> line.replace(Regex("^\\d{13} "), "") }
+                // 去掉毫秒时间戳与级别前缀，界面更干净
+                .map { line ->
+                    line.replace(Regex("^\\d{13} \\[[EIV]\\] "), "")
+                }
         }
     }.getOrDefault(emptyList())
 }

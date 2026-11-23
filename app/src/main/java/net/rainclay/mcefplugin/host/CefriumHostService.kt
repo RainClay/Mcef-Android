@@ -143,15 +143,63 @@ class CefriumHostService : Service() {
     @Volatile
     private var loggerRunning = false
 
+    /**
+     * 当前日志级别。
+     *
+     * <p><b>每次写日志都现读</b>，而不是 onCreate 时缓存一份：设置页改档位
+     * 不应该还要用户重启承载进程 —— 而这一步用户根本不知道要做。
+     * SharedPreferences 读的是进程内缓存，成本可忽略。</p>
+     */
+    private val logLevel: HostSettings.LogLevel
+        get() = HostSettings.logLevel
+
+    /**
+     * 写一条日志。
+     *
+     * <p>级别由调用形态决定：带 [throwable] 的算 [HostSettings.LogLevel.ERRORS]
+     * （这条一定是故障），不带的算 [HostSettings.LogLevel.INFO]。
+     * 心跳、帧诊断这类高频输出走 [fileLogVerbose]，只有调到 VERBOSE 才写。</p>
+     *
+     * <p>低于当前级别就不写文件。logcat 仍然照常输出 —— 它是开发期通道，
+     * 不占用户存储，没必要跟着门控。</p>
+     */
     private fun fileLog(message: String, throwable: Throwable? = null) {
+        val level = if (throwable == null) {
+            HostSettings.LogLevel.INFO
+        } else {
+            HostSettings.LogLevel.ERRORS
+        }
+        emitLog(message, throwable, level)
+    }
+
+    /** 高频诊断输出：心跳、帧上传、探针。只在 VERBOSE 档写。 */
+    private fun fileLogVerbose(message: String, throwable: Throwable? = null) {
+        emitLog(message, throwable, HostSettings.LogLevel.VERBOSE)
+    }
+
+    private fun emitLog(
+        message: String,
+        throwable: Throwable?,
+        level: HostSettings.LogLevel,
+    ) {
+        // logcat 保留：文件读不到时（scoped storage）仍能看到关键事件。
+        if (throwable == null) Log.i(TAG, message) else Log.e(TAG, message, throwable)
+
+        if (level.ordinal > logLevel.ordinal) return // 低于门槛：不落盘
+
         val details = throwable?.let {
             val sw = StringWriter()
             it.printStackTrace(PrintWriter(sw))
             "\n" + sw.toString()
         } ?: ""
-        // logcat 保留：文件读不到时（scoped storage）仍能看到关键事件。
-        if (throwable == null) Log.i(TAG, message) else Log.e(TAG, message, throwable)
-        if (!logQueue.offer("${System.currentTimeMillis()} $message$details")) {
+        // 级别前缀让界面与日志本身都能直接看出这条是什么：
+        //   E = error（总是写）、I = info、V = verbose
+        val tag = when (level) {
+            HostSettings.LogLevel.ERRORS -> "E"
+            HostSettings.LogLevel.INFO -> "I"
+            HostSettings.LogLevel.VERBOSE -> "V"
+        }
+        if (!logQueue.offer("${System.currentTimeMillis()} [$tag] $message$details")) {
             logDropped.incrementAndGet() // 队列满则丢弃，绝不在调用线程上阻塞
         }
     }
@@ -412,7 +460,7 @@ class CefriumHostService : Service() {
                     hits++
                 }
             }
-            fileLog(
+            fileLogVerbose(
                 "classpath prewarm done hits=$hits cost=${System.currentTimeMillis() - t0}ms " +
                     "loader=${cl.javaClass.name}"
             )
@@ -444,7 +492,7 @@ class CefriumHostService : Service() {
                     }
                     // 最后进入的 CEF 调用也带在心跳里：进程若在两次心跳之间直接死掉
                     // （native crash / 被系统杀掉），上一行心跳就是唯一的现场记录。
-                    fileLog(
+                    fileLogVerbose(
                         "hb pid=${android.os.Process.myPid()} paints=$paints frames=$frameSentCount " +
                             "frameCb=$frameCallbackCount asyncTick=$asyncTickCount " +
                             "lastNative=${lastMainNativeCall}"
@@ -503,6 +551,8 @@ class CefriumHostService : Service() {
         super.onCreate()
         instance = this
         appContext = applicationContext
+        // 先 init 设置：写日志时会现读档位，init 必须先完成。
+        HostSettings.init(this)
         startFileLogger()
         fileLog("service onCreate pid=${android.os.Process.myPid()}")
         logBuildIdentity()
@@ -517,6 +567,10 @@ class CefriumHostService : Service() {
         instance = null
         heartbeatRunning = false
         fileLog("service onDestroy")
+        // 停机前落一次最终状态：心跳一停文件就不再更新，界面读到的 updatedAt
+        // 会立刻变旧，只剩「已停止」—— 用户想看的「上次跑到多少帧」就没了。
+        // 这里把 running=false 与当时的计数一起写下去。
+        runCatching { writeSnapshotFile(snapshot().copy(running = false, cefReady = false)) }
         stopHost()
         // 停日志线程前留出排空时间，避免丢掉最后几行（正是卡死现场最需要的部分）。
         loggerRunning = false
@@ -2074,10 +2128,13 @@ class CefriumHostService : Service() {
             val o = org.json.JSONObject(f.readText())
             val updatedAt = o.optLong("updatedAt", 0L)
             val stale = System.currentTimeMillis() - updatedAt > 10_000L
+            // 计数不清零：进程被杀时 updatedAt 会变旧，但那一组 paints/frames
+            // 恰恰是排查要看的「上次跑到哪」。只有连接类字段跟着 stale 走 ——
+            // 没人连着一个已经死掉的 host。
             Snapshot(
                 running = o.optBoolean("running", false) && !stale,
                 cefReady = o.optBoolean("cefReady", false) && !stale,
-                browsers = if (stale) 0 else o.optInt("browsers", 0),
+                browsers = o.optInt("browsers", 0),
                 paints = o.optLong("paints", 0L),
                 framesSent = o.optLong("framesSent", 0L),
                 clients = if (stale) 0 else o.optInt("clients", 0),

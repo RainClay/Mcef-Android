@@ -37,6 +37,7 @@ object HostSettings {
     private const val KEY_DESKTOP_UA = "desktop_user_agent"
     private const val KEY_MEDIA_GESTURE = "media_playback_without_gesture"
     private const val KEY_AUTO_START = "auto_start_host"
+    private const val KEY_LOG_LEVEL = "log_level"
 
     @Volatile
     private var prefs: SharedPreferences? = null
@@ -73,4 +74,32 @@ object HostSettings {
     var autoStartHost: Boolean
         get() = p()?.getBoolean(KEY_AUTO_START, true) ?: true
         set(value) { p()?.edit()?.putBoolean(KEY_AUTO_START, value)?.apply() }
+
+    /**
+     * 日志级别。
+     *
+     * <p>默认 [LogLevel.ERRORS]：只写失败与异常。原因很实际 —— host 的心跳
+     * 每 2 秒一行、帧诊断每次上传一条，跑半小时日志就上百 MB，
+     * 而真出问题时需要的往往只是那几行报错。</p>
+     *
+     * <p>排查连接问题调 [LogLevel.INFO]（补上握手、生命周期、命令分发），
+     * 复现卡死这类才需要 [LogLevel.VERBOSE]（再加心跳与帧诊断）。</p>
+     */
+    var logLevel: LogLevel
+        get() = runCatching {
+            LogLevel.valueOf(
+                p()?.getString(KEY_LOG_LEVEL, LogLevel.ERRORS.name) ?: LogLevel.ERRORS.name
+            )
+        }.getOrDefault(LogLevel.ERRORS)
+        set(value) { p()?.edit()?.putString(KEY_LOG_LEVEL, value.name)?.apply() }
+
+    /** 日志级别。序号越大越啰嗦；写日志时用 {@code level <= 当前档} 判断。 */
+    enum class LogLevel {
+        /** 只写失败、异常、握手拒绝。 */
+        ERRORS,
+        /** 再加生命周期、命令分发、握手成功。 */
+        INFO,
+        /** 再加心跳、帧诊断等高频输出。 */
+        VERBOSE,
+    }
 }
