@@ -1,216 +1,141 @@
 # MCEF for Android
 
 把 **Cefrium**（Chromium Embedded Framework 的原生 Android 移植）包装成
-**JCEF 的 Java API**，让依赖 `org.cef.*` / `com.cinemamod.mcef.*` 的 Minecraft mod
-能在 Android 上运行，**不改一行消费方代码**。
+**JCEF 的 Java API**，让依赖 `org.cef.*` / `com.cinemamod.mcef.*` 的 mod
+能跑在 Android 上的 Minecraft 里，不改一行消费方代码。
 
-首个目标：[**WebDisplays**](https://github.com/CinemaMod/webdisplays) —— 在 MC 世界里
-创建浏览器屏幕的 mod。
-
-> **想直接用**：取 [`v2.2.0-1.20.1-android`](../../releases/tag/v2.2.0-1.20.1-android)
-> 的测试包（mod jar + 启动器 APK + `libmcef.so`），或按下表切到对应分支自行构建。
-> 注意 release 是 2.2.0 测试包，`1.20.1` 分支源码已到 **2.3.1**（so 不再进 jar），
-> 两者打包方式不同，以分支 README 为准。
+已在 **WebDisplays + MC 1.20.1 Forge + Zalith Launcher 2** 上实机验证。
 
 ---
 
-## 分支说明
+## 仓库结构
 
-| 分支 | 内容 | 状态 |
-|---|---|---|
-| `main` | 项目总览与架构说明（本分支） | — |
-| [`1.20.1`](../../tree/1.20.1) | MC 1.20.1 Forge 侧的 `org.cef.*` / `com.cinemamod.mcef.*` 兼容层 | **实机验证可用**，最完整 |
-| [`libmcef-source`](../../tree/libmcef-source) | `libmcef.so` 的 C++/JNI 源码（CMake + NDK） | 可构建 |
-| [`host-plugin`](../../tree/host-plugin) | 独立的引擎插件 APK：Cefrium + host 服务 + `libcef.so`，经 NativeLibPlugin 协议接入 | **实机验证可用**，启动器保持上游原版 |
-| [`26.1.2`](../../tree/26.1.2) | 直连 Cefrium 的早期探索版 | 接口不全，**不能用于 MC** |
+```
+Mcef_Android/
+├── 1.20.1/        MC 1.20.1 Forge 侧的 org.cef.* / com.cinemamod.mcef.* 兼容层
+└── 26.1.2/        直连 Cefrium 的早期探索版（不能用于 MC，仅作参考）
+native/
+└── mcef_bridge/   libmcef.so 的 C++/JNI 源码（CMake + NDK）
+docs/
+├── mod.md         1.20.1 的详细文档（架构、帧驱动、踩坑记录、能力边界）
+├── native.md      native 层的设计决定与握手协议
+└── archive-26.1.2.md  26.1.2 的说明
+```
 
-四个实现分支各有独立 README；`1.20.1` 那份最详细（架构、帧驱动、踩坑记录、能力边界），
-`host-plugin` 那份写清了打包与隔离子进程的约束。
+**引擎插件**（host 服务 + `libcef.so` + Cefrium 运行时）在
+[`host-plugin`](../../tree/host-plugin) 分支，独立发版。
 
 ---
 
-## 为什么需要这一层
-
-WebDisplays 依赖 CinemaMod 的 MCEF，而 MCEF 继承自 JCEF 的 `CefBrowserOsr`：
-
-```
-WebDisplays
-   └──依赖──▶  com.cinemamod.mcef.MCEFBrowser
-                    └──extends──▶  org.cef.browser.CefBrowserOsr   (JCEF)
-                                        └── JNI ──▶  libcef（桌面 C++）
-```
-
-JCEF 只是 libcef 的 Java 胶水，Android 上没有它的运行时。所以本项目做的事是：
-**保持上层 API 形状不变，把最底下那层换掉。**
-
-但换法有个硬约束：**Minecraft 跑在纯 OpenJDK JVM 里，不是 ART。**
-它加载不到 `android.*` 类 —— 而 Cefrium 的 API 签名里就有：
-
-```java
-public static synchronized boolean Cefrium.initialize(android.content.Context);
-public android.os.Bundle CefriumBrowser.saveState();
-public void CefriumBrowser.sendKeyEvent(android.view.KeyEvent);
-```
-
-**所以 MC 侧那一层必须零 `android.*` 依赖。** 验证方法：官方 `mcef-3.3.1-26.1.jar`
-里 `android/` 引用数是 **0**。
-
----
-
-## 最终架构
+## 架构
 
 ```
 MC JVM（纯 OpenJDK，加载不到 android.*）
   └── com.cinemamod.mcef.*        零 android 依赖
         ├── org.cef.*             JCEF API 兼容层
         └── McefNative（JNI）
-              └── libmcef.so      ← 打进启动器 APK 的 lib/arm64-v8a/
+              └── libmcef.so      ← 引擎插件 APK 的 lib/arm64-v8a/
                     └── IPC  socket 127.0.0.1:39090
                           └── host 进程（引擎插件内）
-                                （ART + Cefrium 0.18.0 + libcef）
+                                （ART + Cefrium + libcef）
 ```
 
-**Cefrium 只跑在 host 进程里，MC 侧完全不接触它。**
+**Cefrium 只跑在引擎插件的 host 进程里，MC 侧完全不接触它。**
 
-host 现在住在独立的引擎插件 APK 里（`host-plugin` 分支），启动器保持上游原版。
-
-帧驱动链（2.3.x）：
-
-```
-MCEFMod @ RenderTickEvent.START
-  └── MCEFRenderer.beginMinecraftFrame()   // 只 ++ 帧号，不碰 JNI/GL
-        └── WebDisplays → getTextureID()
-              └── claimPumpForFrame(帧号)  // 同一 MC 帧只放行一次
-                    └── tick()
-                          ├── peekTextureID()      // 不触发 pump，防自递归
-                          ├── dispatchPendingQueries()
-                          ├── getFrameInfo()       // version<=0 或没变就返回
-                          ├── copyFrame()
-                          └── onPaint()            // R/B 交换 + glTexImage2D
-```
-
-host 现在住在独立的引擎插件里（仓库的 `host-plugin` 分支），
-启动器保持上游原版 —— 见该分支 README。
+为什么必须这样分层：Cefrium 的 API 签名里就有 `android.content.Context`、
+`android.view.KeyEvent` 这些类型，而 MC 跑在纯 OpenJDK JVM 里，加载不到
+`android.*` 类，直接引用就是 `NoClassDefFoundError`。
 
 ---
 
-## 关键设计决定（都有实测依据）
+## 构建
 
-### 1. `org.cef.*` 只实现被真正调用到的成员
+每个版本目录是独立工程，各自带 gradle wrapper。
 
-不照抄 JCEF 全集。依据是从消费方 jar 里提取字节码引用：
+**1.20.1 的 mod**
 
 ```bash
-find wd_extract -name "*.class" | xargs -I{} javap -p -c {} \
-  | grep -oE "// (Method|InterfaceMethod|Field) (org/cef|com/cinemamod/mcef)[^ ]*"
+cd Mcef_Android/1.20.1
+./gradlew build
+# 产物：build/libs/mcef-forge-2.3.1-1.20.1-android.jar
 ```
 
-WebDisplays 2.0.2 的结果：**22 个类引用、42 个成员引用**。多写的成员只会让人
-误以为「已经支持了」。**宁可缺，不要假。**
+Java 17+，Maven 解析 MC/Forge/LWJGL（ForgeGradle 6）。
+`libs/` 是可选本地覆盖入口，不存在也不报错。
 
-### 2. JNI 用动态注册，符号名不含包名
+**native 桥**
 
-原来的 `libmcef.so` 每个函数都叫
-`Java_net_ccbluex_liquidbounce_mcef_nativebridge_McefNative_init` ——
-**包名被编译进符号名**，换个包名就 `UnsatisfiedLinkError`。
+```bash
+cd native/mcef_bridge
+clang++ -shared -fPIC -O2 -std=c++17 -fvisibility=hidden \
+  -I include src/*.cpp -llog -o libmcef.so
+```
 
-改成 `JNI_OnLoad` + `RegisterNatives`，`kTargetClasses` 里同时登记 LiquidBounce 与
-本项目两个类路径。加新包名只需往列表加一行，不新增导出符号。
+CMake 3.22+ / NDK / `arm64-v8a` / `android-24`，产物约 134 KB。
 
-### 3. 帧上传由 `getTextureID()` 驱动，不是 RenderTickEvent
+**引擎插件** 见 [`host-plugin`](../../tree/host-plugin) 分支的 README。
 
-**这是最关键的一条。** 试过在 `RenderTickEvent.START` 上传，那是帧的最开头，
-MC 可能还在切 FBO、用别的 texture unit，此时 `glTexImage2D` 在 MobileGlues 上
-直接段错误（`libmobileglues+0x5971f0`）。
-
-改成在 `getTextureID()` 里按需上传：WebDisplays 的 `ScreenRenderer` 调用它之后
-会立刻 `_setShaderTexture(0, texId)` 采样 —— **那一刻 GL 正处于「准备画这张纹理」
-的完整状态**，最安全。
-
-配套的限流有三道闸，缺一不可：
-
-- `peekTextureID()` 供 `tick()` 内部检查纹理是否创建，不触发 pump；
-  否则就是 `getTextureID → beforeUse → tick → getTextureID` 自递归
-  （实测 `-Xss2040k` 下 6.2 万层、`-Xss512k` 下 7331 层）。
-- `MCEFBrowser.pumping`（`AtomicBoolean`）兜底防重入。
-- `claimPumpForFrame()` 按 `RenderTickEvent.START` 递增的帧号去重；
-  不去重则 WebDisplays 每个屏幕面、每个渲染 pass 都会触发一次
-  `getFrameInfo`（实测过 **62258 次/帧**）。
-
-`version <= 0` 是 native 初始化时的全透明占位帧，不复制、不上传；
-`lastVersion` 只在 GL 上传成功后推进，失败时下一帧允许重试。
-
-### 4. 纹理格式用 `GL_BGRA + GL_UNSIGNED_INT_8_8_8_8_REV`，但 CPU 侧要换 R/B
-
-三种组合的实测结果：
-
-| 组合 | 结果 |
-|---|---|
-| `GL_RGBA + GL_UNSIGNED_BYTE` | gl4es 崩在 `__memcpy_aarch64_simd` |
-| `GL_BGRA + REV`，不交换 | 不崩，但画面红蓝反转 |
-| `GL_BGRA + REV`，先交换 | **正确（本实现）** |
-
-`GL_BGRA` 这条路径上驱动并没有按 BGRA 语义处理，而是当 RGBA 读了。解法：CPU 侧
-先把字节换成 `[R][G][B][A]`，让「按 RGBA 读」的结果正好正确，同时保留 `GL_BGRA`
-格式参数走不崩的那条路。
-
-### 5. so 放 APK 里，不塞 jar
-
-Android 上 `/data/local/tmp` 之类临时目录常挂 `noexec`，从 jar 解压 `.so` 再
-`System.load` 会失败。启动器把 `libmcef.so` 打进 APK 的 `lib/arm64-v8a/`，
-`System.loadLibrary("mcef")` 即可 —— 权限和 SELinux 上下文都是对的。
-
-**当前代码里 jar 不带 so**（2.3.0 起删掉解压回退与 `-PwithNative`）。这样可避免
-mod 版本与启动器 so 版本错配 —— JNI 是动态注册，错配只报 `UnsatisfiedLinkError`，
-看不出是版本问题。
-
-### 6. resize 只转发，不在本地伪造帧
-
-Cefrium ≥0.15.0 提供 `CefriumBrowser.setSize()`。native 侧只发 `{"cmd":"resize"}`
-给 host，**不动已发布的帧快照、不改本地宽高**。若在本地先换成一张新尺寸的全透明帧
-并 `frame_version++`，客户端会把这张白帧上传，而页面静止时 CEF 不再回调
-`OnPaint`，白屏会一直留着。
-
-另有一处容易踩的语义重叠：`MCEFBrowser.resize()` 在 WebDisplays 语境下
-**不是改画布尺寸**，而是记录「屏幕的逻辑分辨率」（WD 的 `hit2pixels` 按
-`方块尺寸 * 16 - 4 再 * 8` 算，1×1 屏幕是 96×96）。画布保持 1920×1080，
-鼠标坐标按分辨率换算。真正改画布的入口是 `setCanvasSize()`。
+预编译产物见 [Releases](../../releases)。
 
 ---
 
-## 已知限制
+## 能力边界
 
 > 下表是**本项目当前实现**的能力边界，不代表 Cefrium 的上限。
 > 标注「本项目未升级」的项，引擎侧已有对应 API，只是 host 还没接。
 
-| 功能 | 状态 | 原因 |
+| 功能 | 状态 | 说明 |
 |---|---|---|
-| **`resize`** | ✅ 支持（Cefrium ≥0.15.0） | native 转发命令，host 调 `setSize()`，新尺寸帧由 host 推回 |
-| **鼠标输入** | ✅ 通 | move/down/up/wheel 直连 `CefriumBrowser` 鼠标 API；坐标是屏幕逻辑分辨率，由 `clampX/clampY` 换算到画布 |
-| **`cefQuery` / `sendQuery`** | ✅ 已通（2.3.0） | 页面 → host → native 队列 → `CefQueryCallbackHandler` → `queryReply` → 页面 |
-| **键盘输入** | ✅ 支持（Cefrium ≥0.18.0） | 字符走 `imeCommitText`，按键走 `sendKeyEvent(android.view.KeyEvent)`（内部做 Android→Windows 映射并发 RAWKEYDOWN/CHAR/KEYUP）。GLFW 键码由 `GlfwToAndroidKey` 换算。**五参 `sendKeyEvent` 要的是 Windows 虚拟键码，别用** |
-| **暂停保护** | ✅ | 暂停时 `getTextureID()`/`tick()` 提前返回 —— 半冻结的 GL 上下文里 `glTexImage2D` 会在 MobileGlues 崩 |
-| **GL 状态卫生** | ✅ | 尺寸不变走 `glTexSubImage2D`；上传前后隔离 `GL_UNPACK_*`，避免被别的 mod 污染后按错误步长读 |
-| **标题回调** | ❌ `getTitle()` 恒空串 | IPC 桥没有取标题的通道。Cefrium 0.21.0 已提供 `getTitle()`，本项目未升级 |
-| **光标监听** | ❌ 不会触发 | 两侧都没有 cursor 命令，Cefrium 也没暴露回调 |
-| **资源拦截** | ⚠️ 只能放行/拦截 | 桥只给 URL，不能改写响应体。Cefrium 0.21.0 的 `CefriumResourceInterceptor` 可改写响应，本项目未升级 |
-| **子 frame** | ⚠️ 只支持主 frame | OSR 未区分 frame。Cefrium 0.19.0 起有 `PopupHandler.onCreateWindow`，本项目未接入 |
-| **页面视频** | ⚠️ 取决于 Cefrium 版本 | 0.15.0 修了 OSR 视频不显示与全屏崩溃（[cef-android#16](https://codeberg.org/cefrium/cef-android/issues/16)）；0.11.0 及更早仍是有声音无画面 |
-| **投屏（MediaRouter）** | ⚠️ 需 host 侧依赖 | 用本地 AAR 依赖时 `androidx.mediarouter` 会丢失；host 侧已接媒体自动播放开关 |
-
-`libcef.so` 本身带 H.264 / AAC（`H264Decoder` / `avc1` / `mp4a` 符号都在），
-所以视频问题不是编解码器缺失，而是 OSR 下硬解走 GPU overlay 路径。
+| **画面渲染** | ✅ | OSR，帧由 `getTextureID()` 驱动 |
+| **鼠标** | ✅ | move/down/up/wheel；坐标是屏幕逻辑分辨率，由 `clampX/clampY` 换算 |
+| **键盘** | ✅ 支持（Cefrium ≥0.18.0） | 字符走 `imeCommitText`，按键走 `sendKeyEvent(KeyEvent)`。**五参版要 Windows 键码，别用** |
+| **JS 查询** | ✅ | `cefQuery` 往返，见 `docs/mod.md` |
+| **IPC 握手** | ✅ | 首包必须 `{cmd:hello, protocol, token}`，3 秒超时断开 |
+| **resize** | ✅ | native 转发命令，host 调 `setSize()` |
+| **暂停保护** | ✅ | 暂停时不上传纹理 —— 半冻结的 GL 上下文里 `glTexImage2D` 会崩 |
+| **标题回调** | ❌ `getTitle()` 恒空串 | Cefrium 0.21.0 已提供 `getTitle()`，本项目未升级 |
+| **光标监听** | ❌ 不会触发 | 两侧都没有 cursor 命令 |
+| **资源拦截** | ⚠️ 只能放行/拦截 | Cefrium 0.21.0 的 `CefriumResourceInterceptor` 可改写响应，本项目未升级 |
+| **子 frame** | ⚠️ 只支持主 frame | Cefrium 0.19.0 起有 `PopupHandler.onCreateWindow`，本项目未接入 |
 
 ---
 
-## 构建与发布
+## 踩过的坑（挑几个）
 
-- `1.20.1`：`./gradlew build`（ForgeGradle 6 + Maven 解析 MC/Forge/LWJGL，
-  JDK 17+，输出 Java 17 字节码）。`libs/` 是可选的本地覆盖入口，不存在也不报错。
-- `libmcef-source`：CMake 3.22+ / NDK / `arm64-v8a` / `android-24`，产物约 134 KB。
-- `host-plugin`：`./gradlew :app:assembleDebug`（AGP 9 + `buildSrc` 里的 `com.cefrium`
-  插件，产物约 153 MB）。`libcef.so` 由 `cefrium-sdk` AAR 自动带入，不入库。
-- 预编译产物见 [Releases](../../releases)。
+**画布尺寸不是坐标空间。** WebDisplays 的 `hit2pixels()` 按
+`方块尺寸 * 16 - 4 再 * 8` 算出 resolution（1×1 屏幕是 96×96），
+交给鼠标方法的坐标范围是 `0..resolution`，不是画布像素。
+两者不换算就是「点了乱跑」。
+
+**画布尺寸也可能变。** 引擎插件的画质档会改画布边长，而 MC 侧构造时
+只知道自己的默认值。帧头的 `w/h` 是唯一可信来源，要据此校正 `viewWidth`。
+
+**`sendKeyEvent` 有两个重载。** 五参版要的是 Windows 虚拟键码；
+按 `(keyCode, scanCode, modifiers, action, char)` 猜着传会让 `type` 位置
+收到键码值，非法 type 让 native 直接崩 —— 表现为按特殊键整个进程被杀、
+无 Java 异常、无 `hs_err`。用 `sendKeyEvent(android.view.KeyEvent)`。
+
+**GL_UNPACK_* 会被污染。** MobileGlues 的 `mg_upload_fix_t` 按
+`ROW_LENGTH` / `ALIGNMENT` / `SKIP_ROWS` / `SKIP_PIXELS` 推算源步长，
+别的 mod 留下的非默认值会让它按错误步长读，越过 buffer 末尾。
+上传前后必须隔离并还原。
+
+更多见 `docs/mod.md` 的「实战踩坑记录」。
+
+---
+
+## 与上游的关系
+
+| 项 | 上游 CinemaMod mcef-forge | 本项目 |
+|---|---|---|
+| 底层 | JCEF → libcef（桌面 C++） | libmcef.so → IPC → 引擎插件里的 Cefrium |
+| 平台 | 桌面（Windows/Mac/Linux） | **仅 Android** |
+| 引擎初始化 | MCEF 自己下载/加载 libcef | 引擎插件负责，MC 侧只连 IPC |
+| JNI 绑定 | 无 | `JNI_OnLoad` 动态注册（符号名不含包名） |
+
+`org.cef.*` 是**按 JCEF 的公开 API 重新写的实现**，不是拷贝；
+`com.cinemamod.mcef.*` 保持同名同签名以兼容消费方，实现为全新编写。
+上游代码一行没用。
 
 ---
 
@@ -221,5 +146,11 @@ Cefrium ≥0.15.0 提供 `CefriumBrowser.setSize()`。native 侧只发 `{"cmd":"
 - 上游 [CinemaMod MCEF](https://github.com/CinemaMod/mcef) 为 LGPL-2.1
 - Cefrium 二进制：**不分发**，构建时由 `cefrium-sdk` AAR 解析
 
-`org.cef.*` 是**按 JCEF 的公开 API 重新写的实现**，不是拷贝；
-`com.cinemamod.mcef.*` 保持同名同签名以兼容消费方，实现为全新编写。
+---
+
+## 相关项目
+
+- [引擎插件源码](https://github.com/RainClay/Mcef-Android/tree/host-plugin) —— Cefrium Host 侧
+- [Releases](https://github.com/RainClay/Mcef-Android/releases) —— 预编译的 jar、so 与插件 APK
+- [WebDisplays](https://github.com/CinemaMod/webdisplays)（MIT）—— 消费方，API 面按它的字节码引用裁剪
+- [CinemaMod MCEF](https://github.com/CinemaMod/mcef)（LGPL-2.1）—— 同类项目的桌面实现，本项目未复用其代码

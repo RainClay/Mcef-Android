@@ -1,0 +1,82 @@
+// mcef-forge-1.20.1 —— 让 WebDisplays 这类依赖 JCEF API 的 mod 在
+// Android + MC 1.20.1 Forge 上运行。
+//
+// ── 架构（决定了这里的依赖清单）────────────────────────────────────────
+//
+//   MC JVM（纯 OpenJDK，加载不到 android.*）
+//     └── com.cinemamod.mcef.*   ← 本项目（零 android 依赖）
+//           └── McefNative (JNI) → libmcef.so
+//                 └── IPC 127.0.0.1:39090
+//                       └── 启动器 .cefhost 进程（ART + Cefrium + libcef）
+//
+// 所以本项目不依赖 Cefrium SDK：Cefrium 只跑在启动器进程里，
+// MC 侧只跟 libmcef.so 打交道。
+//
+// ── 依赖从哪来 ───────────────────────────────────────────────────────
+//
+// 早先这棵树依赖一个被 .gitignore 排除的 libs/ 目录，干净 clone 直接构建失败。
+// 现在改用 ForgeGradle 6 从 Maven 解析 MC/Forge/LWJGL，libs/ 只作为本地覆盖入口。
+//
+// ── Java 版本 ────────────────────────────────────────────────────────
+//
+// 输出必须是 Java 17 字节码（MC 1.20.1 的 class 是 v61）。
+// 用 JDK 17 或更高版本运行 Gradle 都可以，这里只钉输出级别。
+
+plugins {
+    id 'java-library'
+    id 'net.minecraftforge.gradle' version '6.0.54'
+}
+
+version = '2.3.1-1.20.1-android'
+group = 'com.cinemamod'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+minecraft {
+    mappings channel: 'official', version: '1.20.1'
+}
+
+repositories {
+    maven { name = 'forge'; url = 'https://maven.minecraftforge.net/' }
+    mavenCentral()
+}
+
+dependencies {
+    minecraft 'net.minecraftforge:forge:1.20.1-47.4.0'
+
+    // 可选本地覆盖：把额外的 jar 丢进 libs/ 即可，不存在也不会报错。
+    compileOnly fileTree(dir: 'libs', include: ['*.jar'])
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    // 不要用 --release：它会把 API 视图锁到目标版本，遇到高版本 class 直接报
+    // "class file has wrong version"。-source/-target 只约束输出。
+    options.release = null
+    options.compilerArgs << '-Xlint:-deprecation' << '-Xlint:-unchecked' << '-Xlint:-options'
+}
+
+// so 不进 jar。
+//
+// 只有一条加载路径：启动器把 libmcef.so 打进 APK 的 lib/arm64-v8a/，
+// MC 侧 System.loadLibrary("mcef") 命中。jar 里再带一份既是冗余，
+// 又会让「mod 版本」和「启动器里的 so 版本」有机会对不上 ——
+// 而 JNI 是动态注册，版本错配报的是 UnsatisfiedLinkError，
+// 看不出是版本问题。
+//
+// 原来有个 -PwithNative 开关把 natives/ 塞进 jar，已删除。
+jar {
+    archiveBaseName = 'mcef-forge'
+    manifest {
+        attributes([
+                'Specification-Title'    : 'mcef-forge',
+                'Implementation-Title'   : project.name,
+                'Implementation-Version' : project.version,
+        ])
+    }
+}
+
+// ForgeGradle 6 的 jar 任务已包含 reobf，产物可直接投入 mods/。
