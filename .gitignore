@@ -45,3 +45,9 @@ local.properties
 Mcef_Android/*/build/
 Mcef_Android/*/.gradle/
 native/mcef_bridge/build/
+plugin/build/
+plugin/app/build/
+plugin/buildSrc/build/
+plugin/.gradle/
+plugin/buildSrc/.gradle/
+plugin/.kotlin/

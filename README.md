@@ -14,16 +14,17 @@
 Mcef_Android/
 ├── 1.20.1/        MC 1.20.1 Forge 侧的 org.cef.* / com.cinemamod.mcef.* 兼容层
 └── 26.1.2/        直连 Cefrium 的早期探索版（不能用于 MC，仅作参考）
+plugin/            引擎插件 APK：host 服务 + Cefrium + libcef.so
 native/
 └── mcef_bridge/   libmcef.so 的 C++/JNI 源码（CMake + NDK）
 docs/
 ├── mod.md         1.20.1 的详细文档（架构、帧驱动、踩坑记录、能力边界）
+├── plugin.md      插件的安装、构建、IPC 协议与握手
 ├── native.md      native 层的设计决定与握手协议
 └── archive-26.1.2.md  26.1.2 的说明
 ```
 
-**引擎插件**（host 服务 + `libcef.so` + Cefrium 运行时）在
-[`host-plugin`](../../tree/host-plugin) 分支，独立发版。
+四个工程各自独立构建，互不依赖 —— 只有 IPC 协议（握手版本号）需要同步。
 
 ---
 
@@ -73,7 +74,13 @@ clang++ -shared -fPIC -O2 -std=c++17 -fvisibility=hidden \
 
 CMake 3.22+ / NDK / `arm64-v8a` / `android-24`，产物约 134 KB。
 
-**引擎插件** 见 [`host-plugin`](../../tree/host-plugin) 分支的 README。
+**引擎插件**
+
+```bash
+cd plugin
+bash gradlew :app:assembleDebug
+# 产物：app/build/outputs/apk/debug/app-debug.apk（约 153 MB）
+```
 
 预编译产物见 [Releases](../../releases)。
 
