@@ -17,6 +17,7 @@
  */
 
 #include "mcef_bridge.h"
+#include "mcef_ipc.h"
 
 #include <jni.h>
 #include <limits>
@@ -82,6 +83,12 @@ void jni_shutdown(JNIEnv*, jclass) {
 
 jboolean jni_isInitialized(JNIEnv*, jclass) {
     return mcef_is_initialized() ? JNI_TRUE : JNI_FALSE;
+}
+
+// WebDisplays 坐标换算开关。MC 侧每帧可能都要问（clampX/clampY 在渲染线程），
+// 所以只读一个 atomic，不做 IPC 往返。
+jboolean jni_wdCompatibility(JNIEnv*, jclass) {
+    return mcef_ipc_wd_compatibility() ? JNI_TRUE : JNI_FALSE;
 }
 
 jlong jni_createBrowser(JNIEnv* env, jclass, jstring url, jint width, jint height,
@@ -248,6 +255,7 @@ const JNINativeMethod kMethods[] = {
     {"init",                 "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZLjava/lang/String;)I", (void*) jni_init},
     {"shutdown",             "()V",                                                    (void*) jni_shutdown},
     {"isInitialized",        "()Z",                                                    (void*) jni_isInitialized},
+    {"wdCompatibility",      "()Z",                                                    (void*) jni_wdCompatibility},
     {"createBrowser",        "(Ljava/lang/String;IIFZ)J",                              (void*) jni_createBrowser},
     {"destroyBrowser",       "(J)I",                                                   (void*) jni_destroyBrowser},
     {"resize",               "(JII)I",                                                 (void*) jni_resize},

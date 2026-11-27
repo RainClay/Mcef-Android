@@ -172,9 +172,29 @@ fun HudPage(context: Context, onBack: () -> Unit) {
                         .padding(horizontal = 12.dp)
                         .padding(bottom = 12.dp),
                 ) {
+                    StatRow(
+                        "画质",
+                        s?.qualityLabel?.takeIf { it.isNotEmpty() } ?: "—",
+                    )
+                    HorizontalDivider(Modifier.fillMaxWidth().padding(horizontal = 16.dp))
+                    StatRow(
+                        "帧率上限",
+                        when (val f = s?.fpsLimit) {
+                            null -> "—"
+                            0 -> "不限"
+                            else -> "$f fps"
+                        },
+                    )
+                    HorizontalDivider(Modifier.fillMaxWidth().padding(horizontal = 16.dp))
                     StatRow("OnPaint", "${s?.paints ?: 0} 次")
                     HorizontalDivider(Modifier.fillMaxWidth().padding(horizontal = 16.dp))
                     StatRow("已发送帧", "${s?.framesSent ?: 0} 帧")
+                    if ((s?.framesDropped ?: 0L) > 0L) {
+                        HorizontalDivider(Modifier.fillMaxWidth().padding(horizontal = 16.dp))
+                        // 丢帧是正常现象：超上限的帧由 CEF 下一次 OnPaint 补上。
+                        // 显示它只是为了让用户确认门控真的在工作。
+                        StatRow("限帧丢弃", "${s?.framesDropped} 帧")
+                    }
                     HorizontalDivider(Modifier.fillMaxWidth().padding(horizontal = 16.dp))
                     StatRow(
                         "状态",

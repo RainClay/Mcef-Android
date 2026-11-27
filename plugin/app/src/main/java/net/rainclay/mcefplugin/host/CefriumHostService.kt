@@ -90,6 +90,12 @@ class CefriumHostService : Service() {
         val paints: Long,
         val framesSent: Long,
         val clients: Int,
+        /** 当前画质档（画布边长）。 */
+        val qualityLabel: String = "",
+        /** 当前帧率上限；0 = 不限。 */
+        val fpsLimit: Int = 0,
+        /** 被帧率上限丢弃的帧数，用来确认门控在工作。 */
+        val framesDropped: Long = 0L,
     )
 
     private fun snapshot(): Snapshot = Snapshot(
@@ -99,6 +105,9 @@ class CefriumHostService : Service() {
         paints = paintCount,
         framesSent = frameSentCount,
         clients = if (clientWriter != null) 1 else 0,
+        qualityLabel = HostSettings.canvasQuality.label,
+        fpsLimit = HostSettings.frameRateLimit.fps,
+        framesDropped = framesDroppedByLimit,
     )
 
     /**
@@ -118,6 +127,9 @@ class CefriumHostService : Service() {
                 .put("paints", snap.paints)
                 .put("framesSent", snap.framesSent)
                 .put("clients", snap.clients)
+                .put("qualityLabel", snap.qualityLabel)
+                .put("fpsLimit", snap.fpsLimit)
+                .put("framesDropped", snap.framesDropped)
                 .put("updatedAt", System.currentTimeMillis())
             val f = snapshotFile()
             // 先写临时文件再 rename：UI 侧可能正好在读，
@@ -323,6 +335,32 @@ class CefriumHostService : Service() {
     @Volatile
     private var clientWriter: BufferedWriter? = null
 
+    /**
+     * 上次下发给 MC 的「WD 兼容」值。
+     *
+     * <p>用 -1 表示"还没发过"。心跳每秒比对一次，变了就重发 ——
+     * 这样用户在设置页改开关后不必重连 MC 才生效。</p>
+     *
+     * <p>为什么不用设置页直接发：设置页与 host 是两个进程，
+     * 跨进程通知要 Binder。而心跳本来就每 2 秒跑一次，顺手比对一下
+     * 一个 SharedPreferences 布尔值的成本可以忽略。</p>
+     */
+    @Volatile
+    private var lastSentWdCompat: Int = -1
+
+    /**
+     * 写 socket 的互斥锁。
+     *
+     * <p>帧（writeFrame）与控制行（心跳下发 setCompatibility、sendEvent 等）
+     * 走的是同一条 socket。并发写会让 JSON 头与二进制 payload 交错，
+     * MC 侧按行解析就会读到半截 header —— 表现为"帧头解析不出 size"、
+     * 整条连接被判定不同步而断开。</p>
+     *
+     * <p>写操作都很短（帧最大几 MB，但只是一次 write），
+     * 用普通 synchronized 就够，不必上读写锁。</p>
+     */
+    private val socketWriteLock = Any()
+
     // 帧二进制通道：与 clientWriter 同一条 socket 的输出流。
     @Volatile
     private var clientOutput: OutputStream? = null
@@ -484,6 +522,21 @@ class CefriumHostService : Service() {
                     val snap = snapshot()
                     writeSnapshotFile(snap)
                     publishSnapshot(this@CefriumHostService)
+
+                    // 「WD 兼容」变化就重发。之前只在握手时发一次，
+                    // 用户改了开关却因为连接没断而永远不生效。
+                    runCatching {
+                        val wanted = if (HostSettings.wdCompatibility) 1 else 0
+                        val w = clientWriter
+                        if (w != null && wanted != lastSentWdCompat) {
+                            synchronized(socketWriteLock) {
+                                w.write("{\"cmd\":\"setCompatibility\",\"wd\":$wanted}\n")
+                                w.flush()
+                            }
+                            lastSentWdCompat = wanted
+                            fileLog("setCompatibility pushed wd=$wanted")
+                        }
+                    }
                     val paints = paintCount
                     val now = System.currentTimeMillis()
                     if (paints != lastPaints) {
@@ -495,7 +548,8 @@ class CefriumHostService : Service() {
                     fileLogVerbose(
                         "hb pid=${android.os.Process.myPid()} paints=$paints frames=$frameSentCount " +
                             "frameCb=$frameCallbackCount asyncTick=$asyncTickCount " +
-                            "lastNative=${lastMainNativeCall}"
+                            "lastNative=${lastMainNativeCall} " +
+                            "dropped=$framesDroppedByLimit"
                     )
                     val stalledMs = now - lastPaintProgressAt
                     // 只有"已经出过帧、随后停住"才算冻结。
@@ -914,6 +968,7 @@ class CefriumHostService : Service() {
         // 留着已关闭的 socket 会让每帧都走一次 SocketException。
         clientWriter = null
         clientOutput = null
+        lastSentWdCompat = -1  // 下次连上要重发
         fileLog("client disconnected remote=${runCatching { socket.remoteSocketAddress }.getOrNull()}")
     }
 
@@ -980,8 +1035,18 @@ class CefriumHostService : Service() {
         fileLog("create enter id=$id")
         if (id <= 0L) return
         val url = json.optString("url", "about:blank")
-        val width = json.optInt("width", 800).coerceAtLeast(1)
-        val height = json.optInt("height", 600).coerceAtLeast(1)
+        // 画布尺寸由**插件设置**决定，不用 MC 传的值。
+        //
+        // MC 侧硬编码 1920x1080（MCEFBrowser.DEFAULT_WIDTH/HEIGHT），
+        // 但那是很久以前定的默认值，手机上绝大多数屏幕根本到不了那个像素量，
+        // 高画质档纯属白烧 GPU 与带宽。让用户在插件里选，host 这里覆盖。
+        //
+        // 保留 MC 传的宽高作为参考值记日志，方便对照两边是否一致。
+        val mcWidth = json.optInt("width", 800).coerceAtLeast(1)
+        val mcHeight = json.optInt("height", 600).coerceAtLeast(1)
+        val quality = HostSettings.canvasQuality
+        val width = quality.width
+        val height = quality.height
         val scale = json.optDouble("scale", 1.0).toFloat().coerceAtLeast(0.1f)
         // MC 侧（mcef_bridge）一直在 create 命令里带 transparent，之前没人消费。
         // 它最终落到 CefriumBrowser.setBackgroundColor：0 = 全透明，页面未绘制处 alpha 为 0。
@@ -996,7 +1061,10 @@ class CefriumHostService : Service() {
             runCatching {
                 mainNative("close previous browser id=$id") { browsers.remove(id)?.browser?.close() }
 
-                fileLog("create constructing id=$id size=${width}x${height}")
+                fileLog(
+                    "create constructing id=$id size=${width}x${height} " +
+                        "quality=${quality.label} (mc asked ${mcWidth}x${mcHeight})"
+                )
                 val browser = mainNative("create browser id=$id") {
                     CefriumBrowser(width, height, scale)
                 }
@@ -1746,7 +1814,34 @@ class CefriumHostService : Service() {
         }
     }
 
+    /** 上一次真正发出帧的时刻（纳秒）。帧率门控用。 */
+    @Volatile
+    private var lastFrameEmitNanos: Long = 0L
+
+    /** 被帧率上限丢弃的帧数，进心跳便于确认门控真的在工作。 */
+    @Volatile
+    private var framesDroppedByLimit: Long = 0L
+
     private fun postFrame(id: Long, w: Int, h: Int, stride: Int, payload: ByteArray) {
+        // 帧率门控：超上限的帧**直接丢弃**，不进管道。
+        //
+        // 为什么是丢弃而不是排队：已有的单槽管道本来就在"新帧覆盖旧帧"，
+        // 再排一层只会把延迟越积越大（表现为点了半天才响应）。
+        // 丢掉的帧由 CEF 下一次 OnPaint 补上，页面自身的动画不受影响。
+        //
+        // 只在 VERBOSE 档记日志：这里每帧都走，写文件会把 GPU 拖死。
+        val limitFps = HostSettings.frameRateLimit.fps
+        if (limitFps > 0) {
+            val now = System.nanoTime()
+            val minIntervalNs = 1_000_000_000L / limitFps
+            if (now - lastFrameEmitNanos < minIntervalNs) {
+                framesDroppedByLimit++
+                returnFrameBuffer(payload)
+                return
+            }
+            lastFrameEmitNanos = now
+        }
+
         val replacement = FramePayload(id, w, h, stride, payload)
         // 单槽覆盖时必须回收被丢弃的旧帧，否则 socket 慢时每帧都会分配大数组。
         pendingFrame.getAndSet(replacement)?.let { returnFrameBuffer(it.payload) }
@@ -1776,18 +1871,20 @@ class CefriumHostService : Service() {
             return
         }
         runCatching {
-            writer.write(JSONObject().apply {
-                put("event", "frame")
-                put("id", frame.id)
-                put("w", frame.w)
-                put("h", frame.h)
-                put("stride", frame.stride)
-                put("size", frame.payload.size)
-            }.toString())
-            writer.write("\n")
-            writer.flush()
-            out.write(frame.payload)
-            out.flush()
+            synchronized(socketWriteLock) {
+                writer.write(JSONObject().apply {
+                    put("event", "frame")
+                    put("id", frame.id)
+                    put("w", frame.w)
+                    put("h", frame.h)
+                    put("stride", frame.stride)
+                    put("size", frame.payload.size)
+                }.toString())
+                writer.write("\n")
+                writer.flush()
+                out.write(frame.payload)
+                out.flush()
+            }
             frameSentCount++
             if (!firstFrameSentLogged) {
                 firstFrameSentLogged = true
@@ -1802,9 +1899,13 @@ class CefriumHostService : Service() {
     private fun sendEvent(writer: BufferedWriter, event: JSONObject) {
         writerExecutor.execute {
             runCatching {
-                writer.write(event.toString())
-                writer.write("\n")
-                writer.flush()
+                // 与 writeFrame 共用同一条 socket，必须互斥 ——
+                // 否则事件 JSON 可能插进帧头与二进制 payload 之间。
+                synchronized(socketWriteLock) {
+                    writer.write(event.toString())
+                    writer.write("\n")
+                    writer.flush()
+                }
             }.onFailure {
                 fileLog("sendEvent failed event=${event.optString("event")}", it)
             }
@@ -2138,6 +2239,9 @@ class CefriumHostService : Service() {
                 paints = o.optLong("paints", 0L),
                 framesSent = o.optLong("framesSent", 0L),
                 clients = if (stale) 0 else o.optInt("clients", 0),
+                qualityLabel = o.optString("qualityLabel", ""),
+                fpsLimit = o.optInt("fpsLimit", 0),
+                framesDropped = o.optLong("framesDropped", 0L),
             )
         }.getOrNull()
 

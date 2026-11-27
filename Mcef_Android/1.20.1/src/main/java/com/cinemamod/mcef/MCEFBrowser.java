@@ -800,10 +800,20 @@ public class MCEFBrowser extends CefBrowserOsr {
     }
 
     /** 屏幕坐标 → 画布坐标。分辨率未知时原样返回（仅夹边界）。 */
+    /**
+     * 屏幕坐标 → 画布坐标。
+     *
+     * <p>换算开关由插件下发的「WD 兼容」控制（{@link McefNative#wdCompatibility}）：
+     * 打开时按屏幕分辨率等比缩放，关闭时原样透传。两类场景需要后者：
+     * 消费方不是 WebDisplays 而自己发画布坐标，或 WD 改了坐标语义。</p>
+     *
+     * <p>读 native 的 atomic 而不是缓存到字段：开关改了要即时生效，
+     * 而渲染路径上读一个 atomic 的成本可以忽略。</p>
+     */
     private int clampX(int x) {
         final int w = viewWidth > 0 ? viewWidth : 1;
         int v = x;
-        if (screenResX > 0 && screenResX != w) {
+        if (McefNative.wdCompatibility() && screenResX > 0 && screenResX != w) {
             v = Math.round(x * (float) w / (float) screenResX);
         }
         if (v < 0) return 0;
@@ -813,7 +823,7 @@ public class MCEFBrowser extends CefBrowserOsr {
     private int clampY(int y) {
         final int h = viewHeight > 0 ? viewHeight : 1;
         int v = y;
-        if (screenResY > 0 && screenResY != h) {
+        if (McefNative.wdCompatibility() && screenResY > 0 && screenResY != h) {
             v = Math.round(y * (float) h / (float) screenResY);
         }
         if (v < 0) return 0;

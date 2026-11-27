@@ -141,6 +141,18 @@ public final class McefNative {
 
     public static native boolean isInitialized();
 
+    /**
+     * WebDisplays 坐标换算开关（由引擎插件下发，默认 {@code true}）。
+     *
+     * <p>{@code true} 时 {@code MCEFBrowser} 会把 WD 给的屏幕坐标
+     * （{@code 0..resolution}，1×1 屏幕是 96×96）按画布宽度换算；
+     * {@code false} 时原样透传，只夹边界。</p>
+     *
+     * <p>用户可在插件设置的「WD 兼容」里切换。改动由 host 在握手后下发，
+     * 这里读的是一个 atomic，不做 IPC 往返 —— 渲染线程每帧都可能问。</p>
+     */
+    public static native boolean wdCompatibility();
+
     // ── 浏览器 ────────────────────────────────────────────────────────────
 
     /**

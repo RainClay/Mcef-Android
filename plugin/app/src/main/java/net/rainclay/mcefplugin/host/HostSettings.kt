@@ -38,6 +38,9 @@ object HostSettings {
     private const val KEY_MEDIA_GESTURE = "media_playback_without_gesture"
     private const val KEY_AUTO_START = "auto_start_host"
     private const val KEY_LOG_LEVEL = "log_level"
+    private const val KEY_CANVAS_QUALITY = "canvas_quality"
+    private const val KEY_FRAME_RATE_LIMIT = "frame_rate_limit"
+    private const val KEY_WD_COMPAT = "wd_compatibility"
 
     @Volatile
     private var prefs: SharedPreferences? = null
@@ -92,6 +95,76 @@ object HostSettings {
             )
         }.getOrDefault(LogLevel.ERRORS)
         set(value) { p()?.edit()?.putString(KEY_LOG_LEVEL, value.name)?.apply() }
+
+    /**
+     * 画质档位：决定浏览器的画布边长。
+     *
+     * <p>画布尺寸是"画质"最有效的旋钮 —— 它直接决定每帧的像素量。
+     * 1920×1080 一帧 8.3 MB，1280×720 只要 3.7 MB，带宽与 GPU 上传开销
+     * 都按面积降。WebDisplays 的屏幕实际显示尺寸通常远小于 1080p，
+     * 高画质档在手机上是白烧性能。</p>
+     *
+     * <p>改动需要重建浏览器才生效（画布在 create 时确定）。</p>
+     */
+    var canvasQuality: CanvasQuality
+        get() = runCatching {
+            CanvasQuality.valueOf(
+                p()?.getString(KEY_CANVAS_QUALITY, CanvasQuality.HD.name) ?: CanvasQuality.HD.name
+            )
+        }.getOrDefault(CanvasQuality.HD)
+        set(value) { p()?.edit()?.putString(KEY_CANVAS_QUALITY, value.name)?.apply() }
+
+    enum class CanvasQuality(val width: Int, val height: Int, val label: String) {
+        SMOOTH(1280, 720, "流畅 720p"),
+        BALANCED(1600, 900, "标准 900p"),
+        HD(1920, 1080, "高清 1080p"),
+        ULTRA(2560, 1440, "超清 1440p"),
+    }
+
+    /**
+     * 帧率上限。
+     *
+     * <p>超出的帧直接丢弃，不排队 —— 已有的单槽管道本来就"新帧覆盖旧帧"，
+     * 排队只会把延迟越积越大。</p>
+     *
+     * <p>只影响从 host 发往 MC 的帧；CEF 的 OnPaint 该回调仍回调，
+     * 页面自身的动画/脚本不受影响。</p>
+     */
+    var frameRateLimit: FrameRateLimit
+        get() = runCatching {
+            FrameRateLimit.valueOf(
+                p()?.getString(KEY_FRAME_RATE_LIMIT, FrameRateLimit.FPS_30.name)
+                    ?: FrameRateLimit.FPS_30.name
+            )
+        }.getOrDefault(FrameRateLimit.FPS_30)
+        set(value) { p()?.edit()?.putString(KEY_FRAME_RATE_LIMIT, value.name)?.apply() }
+
+    /**
+     * @property fps 上限帧率，0 表示不限
+     */
+    enum class FrameRateLimit(val fps: Int, val label: String) {
+        FPS_15(15, "省电 15 fps"),
+        FPS_30(30, "均衡 30 fps"),
+        FPS_60(60, "流畅 60 fps"),
+        UNLIMITED(0, "不限"),
+    }
+
+    /**
+     * WebDisplays 兼容：按屏幕逻辑分辨率换算鼠标坐标。
+     *
+     * <p>WD 的 {@code ScreenBlock.hit2pixels()} 按
+     * {@code 方块尺寸 * 16 - 4 再 * 8} 算出 resolution（1×1 屏幕是 96×96），
+     * 交给鼠标方法的坐标范围是 {@code 0..resolution}，不是画布像素。
+     * 不换算就是「点了乱跑、激光笔指哪儿哪儿不对」。</p>
+     *
+     * <p>关掉后坐标原样透传（只夹边界）。给两类场景用：消费方不是
+     * WebDisplays 而自己发画布坐标，或 WD 改了坐标语义的版本。</p>
+     *
+     * <p>默认开。改动即时生效 —— host 在握手后下发，重连会自动重发。</p>
+     */
+    var wdCompatibility: Boolean
+        get() = p()?.getBoolean(KEY_WD_COMPAT, true) ?: true
+        set(value) { p()?.edit()?.putBoolean(KEY_WD_COMPAT, value)?.apply() }
 
     /** 日志级别。序号越大越啰嗦；写日志时用 {@code level <= 当前档} 判断。 */
     enum class LogLevel {

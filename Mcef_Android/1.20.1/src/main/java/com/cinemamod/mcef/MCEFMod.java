@@ -60,6 +60,28 @@ public class MCEFMod {
     public MCEFMod() {
         LOGGER.info("MCEF (Android/Cefrium) mod loaded");
         MinecraftForge.EVENT_BUS.addListener(this::onRenderTick);
+
+        // 在 mod 加载阶段就把桥初始化掉，而不是等第一次 createBrowser。
+        //
+        // 为什么必须提前：WebDisplays 在 SharedProxy.init() 里调
+        // MCEF.scheduleForInit(...)，那时桥还没好，listener 被排进
+        // PENDING_INIT 队列等 initialize() 成功后触发。而 initialize()
+        // 原先只在 createBrowser 前被调 —— 玩家还没放屏幕就永远不触发，
+        // 于是 WD 的 onCefInit() 不执行，它的 minePadRenderer /
+        // laserPointerRenderer 一直是 null。
+        //
+        // 后果不是"少个功能"而是**直接崩**：WD 的 onRenderPlayerHand
+        // 拿到 null 就 renderer.render(...)，手持 MinePad 或激光笔时
+        // NPE（ClientProxy.java:704）。
+        //
+        // 失败不抛：桥那侧可能还没就绪（引擎插件的 host 进程尚未起来），
+        // MCEFBrowser 构造函数里还有一次兜底。
+        try {
+            final boolean ok = MCEF.initialize();
+            LOGGER.info("MCEF bridge initialize at mod load -> {}", ok);
+        } catch (Throwable t) {
+            LOGGER.warn("MCEF bridge initialize at mod load failed, will retry on first browser", t);
+        }
     }
 
     /** 只处理 START 相位；END 什么都不做。 */

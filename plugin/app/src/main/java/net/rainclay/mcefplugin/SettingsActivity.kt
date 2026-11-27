@@ -86,6 +86,11 @@ private fun SettingsPage() {
     var autoStart by remember { mutableStateOf(HostSettings.autoStartHost) }
     var logLevel by remember { mutableStateOf(HostSettings.logLevel) }
     var showLevelDialog by remember { mutableStateOf(false) }
+    var wdCompat by remember { mutableStateOf(HostSettings.wdCompatibility) }
+    var quality by remember { mutableStateOf(HostSettings.canvasQuality) }
+    var showQualityDialog by remember { mutableStateOf(false) }
+    var fpsLimit by remember { mutableStateOf(HostSettings.frameRateLimit) }
+    var showFpsDialog by remember { mutableStateOf(false) }
 
     val libDir = remember(context) {
         runCatching {
@@ -163,6 +168,30 @@ private fun SettingsPage() {
                             HostSettings.mediaPlaybackWithoutGesture = it
                         },
                     )
+                    HorizontalDivider(Modifier.fillMaxWidth().padding(horizontal = 16.dp))
+                    // WebDisplays 的坐标是屏幕逻辑分辨率（1x1 屏幕是 96x96），
+                    // 不是画布像素。不换算就是「点了乱跑、激光笔指偏」。
+                    SwitchPreference(
+                        title = "WD 兼容",
+                        summary = "按 WebDisplays 的屏幕分辨率换算鼠标坐标",
+                        checked = wdCompat,
+                        onCheckedChange = {
+                            wdCompat = it
+                            HostSettings.wdCompatibility = it
+                        },
+                    )
+                    HorizontalDivider(Modifier.fillMaxWidth().padding(horizontal = 16.dp))
+                    BasicComponent(
+                        title = "画质",
+                        summary = "${quality.label} · 改动后需重开屏幕生效",
+                        onClick = { showQualityDialog = true },
+                    )
+                    HorizontalDivider(Modifier.fillMaxWidth().padding(horizontal = 16.dp))
+                    BasicComponent(
+                        title = "帧率上限",
+                        summary = fpsLimit.label,
+                        onClick = { showFpsDialog = true },
+                    )
                 }
             }
 
@@ -225,37 +254,110 @@ private fun SettingsPage() {
         }
     }
 
-    // 日志级别选择。用对话框而不是分段控件：三档且带解释文字，
-    // 对话框能放下每档的用途说明。
-    if (showLevelDialog) {
-        val options = listOf(
-            HostSettings.LogLevel.ERRORS to "仅错误（默认）—— 只写失败、异常、握手拒绝",
-            HostSettings.LogLevel.INFO to "常规 —— 加上生命周期、命令分发、握手成功",
-            HostSettings.LogLevel.VERBOSE to "详细 —— 再加上心跳与帧诊断（刷屏，只在排查时用）",
-        )
-        // miuix 的 DialogContent 是 internal，外部拿不到；用标准 Compose Dialog
-        // 套一层 miuix 的 Card，观感一致且不依赖非公开 API。
-        androidx.compose.ui.window.Dialog(
-            onDismissRequest = { showLevelDialog = false },
-        ) {
-            Card {
-                Text(
-                    text = "日志级别",
-                    style = MiuixTheme.textStyles.title4,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+    ChoiceDialog(
+        show = showLevelDialog,
+        title = "日志级别",
+        options = listOf(
+            Triple(
+                HostSettings.LogLevel.ERRORS, "仅错误（默认）",
+                "只写失败、异常、握手拒绝"
+            ),
+            Triple(
+                HostSettings.LogLevel.INFO, "常规",
+                "加上生命周期、命令分发、握手成功"
+            ),
+            Triple(
+                HostSettings.LogLevel.VERBOSE, "详细",
+                "再加上心跳与帧诊断（刷屏，只在排查时用）"
+            ),
+        ),
+        selected = logLevel,
+        onSelect = {
+            logLevel = it
+            HostSettings.logLevel = it
+            showLevelDialog = false
+        },
+        onDismiss = { showLevelDialog = false },
+    )
+
+    ChoiceDialog(
+        show = showQualityDialog,
+        title = "画质",
+        // 画布尺寸决定每帧像素量，是"画质"最有效的旋钮。
+        // 尺寸在创建浏览器时确定，所以改完要重开屏幕。
+        options = HostSettings.CanvasQuality.entries.map { q ->
+            Triple(q, q.label, describeQuality(q))
+        },
+        selected = quality,
+        onSelect = {
+            quality = it
+            HostSettings.canvasQuality = it
+            showQualityDialog = false
+        },
+        onDismiss = { showQualityDialog = false },
+    )
+
+    ChoiceDialog(
+        show = showFpsDialog,
+        title = "帧率上限",
+        options = HostSettings.FrameRateLimit.entries.map { f ->
+            Triple(f, f.label, describeFps(f))
+        },
+        selected = fpsLimit,
+        onSelect = {
+            fpsLimit = it
+            HostSettings.frameRateLimit = it
+            showFpsDialog = false
+        },
+        onDismiss = { showFpsDialog = false },
+    )
+}
+
+/** 画质档的说明文字：给出像素量对比，让用户能判断值不值。 */
+private fun describeQuality(q: HostSettings.CanvasQuality): String {
+    val mb = q.width.toLong() * q.height * 4 / 1048576.0
+    return "${q.width}×${q.height} · 每帧约 ${"%.1f".format(mb)} MB"
+}
+
+private fun describeFps(f: HostSettings.FrameRateLimit): String = when (f) {
+    HostSettings.FrameRateLimit.FPS_15 -> "省电，视频会有明显掉帧"
+    HostSettings.FrameRateLimit.FPS_30 -> "均衡，日常浏览够用"
+    HostSettings.FrameRateLimit.FPS_60 -> "流畅，接近满帧"
+    HostSettings.FrameRateLimit.UNLIMITED -> "不限制，由页面自身重绘节奏决定"
+}
+
+/**
+ * 通用单选对话框。
+ *
+ * <p>miuix 的 `DialogContent` 是 internal，外部拿不到，所以用标准 Compose
+ * `Dialog` 套一层 miuix 的 `Card` —— 观感一致且不依赖非公开 API。</p>
+ *
+ * @param options 三元组：值、标题、说明
+ */
+@Composable
+private fun <T> ChoiceDialog(
+    show: Boolean,
+    title: String,
+    options: List<Triple<T, String, String>>,
+    selected: T,
+    onSelect: (T) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    if (!show) return
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Card {
+            Text(
+                text = title,
+                style = MiuixTheme.textStyles.title4,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            )
+            HorizontalDivider(Modifier.fillMaxWidth().padding(horizontal = 16.dp))
+            options.forEach { (value, label, desc) ->
+                BasicComponent(
+                    title = if (value == selected) "✓ $label" else label,
+                    summary = desc,
+                    onClick = { onSelect(value) },
                 )
-                HorizontalDivider(Modifier.fillMaxWidth().padding(horizontal = 16.dp))
-                options.forEach { (level, desc) ->
-                    BasicComponent(
-                        title = if (level == logLevel) "✓ ${level.name}" else level.name,
-                        summary = desc,
-                        onClick = {
-                            logLevel = level
-                            HostSettings.logLevel = level
-                            showLevelDialog = false
-                        },
-                    )
-                }
             }
         }
     }

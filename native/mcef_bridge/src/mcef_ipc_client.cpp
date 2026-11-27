@@ -55,6 +55,10 @@ std::atomic<bool> g_running{false};
 std::atomic<int> g_fd{-1};
 std::string g_endpoint;
 
+// WebDisplays 坐标换算开关。Host 在握手后下发，默认 true。
+// 由 mcef_wd_compatibility() 给 JNI 层读。
+std::atomic<bool> g_wd_compatibility{true};
+
 // ── 握手 ────────────────────────────────────────────────────────────────
 //
 // 39090 是本机回环端口，任何应用都能连。而协议里 input 能注入事件、
@@ -137,6 +141,28 @@ bool looks_like_frame(const std::string& line) {
 
 void handle_line(const std::string& line) {
     const std::string event = extract_json_string(line, "event");
+
+    // 进程级事件先处理 —— 它们**没有 id 字段**，如果先做 id 校验会被整条丢弃。
+    // 之前把 id 检查放在最前面，setCompatibility 就是因为缺 id 而永远不生效
+    // （表现为：用户在插件里关了「WD 兼容」，鼠标坐标却照旧换算）。
+    // 注意：这条是 Host 发给我们的**命令**，用 "cmd" 字段；
+    // 而 host→MC 的其它消息（frame/query/url/created）用的是 "event"。
+    // 之前只查 event，于是这条永远匹配不上 —— 表现为「插件里关了
+    // WD 兼容，坐标却照旧换算」。两个字段都查，两种写法都认。
+    const std::string cmd = extract_json_string(line, "cmd");
+    if (event == "setCompatibility" || cmd == "setCompatibility") {
+        // Host 下发的坐标换算开关。true = 按屏幕分辨率换算（WebDisplays），
+        // false = 原样透传。存全局而不是按浏览器：这是产品级设置。
+        g_wd_compatibility = extract_json_int(line, "wd", 1) != 0;
+        // 只在设置真的变化时才写一行，成本可忽略。
+        // 这条日志排查过两次「开关不生效」，值得留着。
+        if (FILE* f = ::fopen("/storage/emulated/0/mcef-host-logs/mcef-bridge.log", "a")) {
+            ::fprintf(f, "setCompatibility wd=%d\n", g_wd_compatibility.load() ? 1 : 0);
+            ::fclose(f);
+        }
+        return;
+    }
+
     const auto id = static_cast<mcef_browser_t>(extract_json_int(line, "id", 0));
     if (id <= 0) return;
 
@@ -469,6 +495,10 @@ int mcef_ipc_start(const char* endpoint) {
     g_tx_thread = std::thread(tx_main);
     // 首次连接可能未完成就返回；调用方可稍后用 mcef_ipc_is_running 判断。
     return MCEF_OK;
+}
+
+int mcef_ipc_wd_compatibility(void) {
+    return g_wd_compatibility.load() ? 1 : 0;
 }
 
 void mcef_ipc_stop(void) {

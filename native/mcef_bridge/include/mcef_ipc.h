@@ -34,6 +34,10 @@ extern "C" {
 int mcef_ipc_start(const char* endpoint);
 void mcef_ipc_stop(void);
 int mcef_ipc_is_running(void);
+
+/* WebDisplays 坐标换算开关（1 = 按屏幕分辨率换算，0 = 原样透传）。
+ * Host 在握手后通过 setCompatibility 命令下发，默认 1。 */
+int mcef_ipc_wd_compatibility(void);
 int mcef_ipc_send_json(const char* json_line);
 
 // 非阻塞入队：由独立发送线程按 FIFO 顺序真正写出。
