@@ -1,0 +1,28 @@
+// mcef-android —— 在 Android 上把 Cefrium 包装成 JCEF API（MCEF 的 Android 移植）
+//
+// 依赖全部用本地 libs/ 下的 jar（compileOnly）：
+//   cefrium-sdk-*.jar   Cefrium 的 classes.jar（从 AAR 里解出来）
+//   minecraft-*.jar     MC 本体，提供 RenderSystem / blaze3d
+//   lwjgl*-3.4.1.jar    glGenTextures 等
+//   android.jar         Handler / Looper / Log
+//
+// 这样构建不依赖 Loom、不需要联网拉 AAR，便于快速验证编译。
+
+plugins {
+    id 'java-library'
+}
+
+java {
+    // MC 26.1.2 的 class 文件是 Java 25（version 69），编译期读它必须 >= 25。
+    sourceCompatibility = JavaVersion.VERSION_25
+    targetCompatibility = JavaVersion.VERSION_25
+}
+
+dependencies {
+    compileOnly fileTree(dir: 'libs', include: ['*.jar'])
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.compilerArgs << '-Xlint:-deprecation' << '-Xlint:-unchecked' << '-Xlint:-options'
+}

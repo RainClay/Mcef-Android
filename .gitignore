@@ -40,3 +40,8 @@ libs/
 
 # 本地配置（可能含签名口令）
 local.properties
+
+# 各版本目录的构建产物（它们在子目录里，前面的 build/ 规则盖不住）
+Mcef_Android/*/build/
+Mcef_Android/*/.gradle/
+native/mcef_bridge/build/

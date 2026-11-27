@@ -1,0 +1,97 @@
+/*
+ * MCEF-Android (Forge 1.20.1)
+ * Copyright (C) 2026 Rain_Clay and contributors
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * PROVENANCE: the API shape follows JCEF / Chromium Embedded Framework
+ * (BSD-3-Clause). This file is an independent Android implementation and
+ * contains no JCEF source code. Class, package and method names are kept
+ * identical only to satisfy bytecode references from consumers such as
+ * WebDisplays.
+ */
+
+package org.cef.browser;
+
+import org.cef.handler.CefMessageRouterConfig;
+import org.cef.handler.CefMessageRouterHandler;
+
+/**
+ * JS 查询路由器。
+ *
+ * <p><b>在 Android 侧它只是个容器，不路由任何东西。</b>保持 JCEF 的形状
+ * （{@code create(...)} + {@code addHandler(...)}），让消费方代码不用改。</p>
+ *
+ * <p>注册路径：{@code client.addMessageRouter(CefMessageRouter.create(handler))}
+ * → {@link org.cef.CefClient} 把 handler 取出来放进自己的查询列表。
+ * 本类自己不参与分发 —— 分发由 {@code MCEFBrowser.dispatchPendingQueries()}
+ * 每帧从 native 队列取查询后遍历该列表完成，
+ * 详见 {@link org.cef.handler.CefQueryCallbackHandler} 的类注释。</p>
+ */
+public class CefMessageRouter {
+
+    private final CefMessageRouterConfig config;
+    private volatile CefMessageRouterHandler handler;
+
+    private CefMessageRouter(CefMessageRouterConfig config, CefMessageRouterHandler handler) {
+        this.config = config == null ? new CefMessageRouterConfig() : config;
+        this.handler = handler;
+    }
+
+    /** 用默认配置创建路由器。 */
+    public static CefMessageRouter create(CefMessageRouterHandler handler) {
+        return new CefMessageRouter(new CefMessageRouterConfig(), handler);
+    }
+
+    /** 带配置创建。配置在 Android 侧只记录，不影响实际查询函数名。 */
+    public static CefMessageRouter create(CefMessageRouterConfig config, CefMessageRouterHandler handler) {
+        return new CefMessageRouter(config, handler);
+    }
+
+    /** 当前持有的处理器。 */
+    public CefMessageRouterHandler getHandler() {
+        return handler;
+    }
+
+    /** 配置。 */
+    public CefMessageRouterConfig getConfig() {
+        return config;
+    }
+
+    /**
+     * 追加处理器。
+     *
+     * <p>Android 侧一个路由器只留一个处理器（后注册的替换先注册的）——
+     * 与 Cefrium 的 {@code setQueryHandler} 单槽语义一致。</p>
+     */
+    public boolean addHandler(CefMessageRouterHandler handler, boolean first) {
+        if (handler == null) return false;
+        this.handler = handler;
+        return true;
+    }
+
+    /** 移除处理器。 */
+    public boolean removeHandler(CefMessageRouterHandler handler) {
+        if (this.handler == handler) {
+            this.handler = null;
+            return true;
+        }
+        return false;
+    }
+
+    /** 取消所有待处理查询。Android 侧由 IPC 层处理，这里无操作。 */
+    public void cancelPending() {
+        // no-op
+    }
+}
